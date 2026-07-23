@@ -39,6 +39,45 @@ Tudo desbloqueado, sem versão Premium.
 - `SettingsRepository` — chaves geométricas com sufixo `smallestScreenWidthDp`,
   por isso um foldable mantém configurações distintas aberto/fechado.
 
+## Aplicações privadas (só glow, sem sistema)
+
+Em **Aplicações privadas…** escolhes as apps cujas notificações devem ser
+removidas do sistema mal chegam: sem ícone na barra de estado, sem
+pré-visualização no ecrã de bloqueio, sem entrada no painel. Fica apenas o
+flash da Glowbar, com cor à tua escolha por aplicação.
+
+### Aviso persistente
+
+Em vez de um flash que passa despercebido, o aviso **fica**: a barra divide-se
+em segmentos — um por aplicação com aviso por resolver — cada um na cor dessa
+app, com respiração lenta e desfasada. Dois segmentos = duas apps à espera.
+
+O aviso desaparece quando:
+
+- **abres a app** — deteção via `UsageStatsManager` (exige "acesso ao histórico
+  de utilização", concedido nas definições do sistema);
+- **tocas na barra** — abre a app mais recente e limpa o sinal; a janela só fica
+  sensível ao toque enquanto houver pendências;
+- **expira o tempo definido**, se tiveres configurado um (0 = nunca).
+
+Limites honestos desta funcionalidade:
+
+- **O som e a vibração já dispararam** quando a app recebe o evento; não é
+  possível intercetá-los. Para silêncio total, define as notificações dessas
+  apps como silenciosas em Definições → Apps → [app] → Notificações.
+- Pode haver um piscar de milissegundos do pop-up antes do cancelamento.
+- Notificações **persistentes/não-dispensáveis** não podem ser canceladas.
+- A supressão só atua com a Glowbar **ligada**; caso contrário ficarias sem
+  notificação e sem sinal luminoso.
+- Sem o acesso ao histórico de utilização, o aviso só se limpa por toque ou por
+  tempo — o resto funciona à mesma.
+- O toque na barra só é captado com avisos pendentes; ainda assim, com a barra
+  no topo pode apanhar o gesto de puxar o painel de notificações. Se te
+  incomodar, desliga "Tocar na barra abre a app" ou usa outra margem.
+- A notificação suprimida **perde-se** — não fica no histórico do sistema. A app
+  guarda apenas o nome do pacote e a hora, para saberes que app te procurou;
+  o conteúdo nunca é lido nem guardado.
+
 ## Limitações conhecidas (v1)
 
 - **Autohide em fullscreen** usa a visibilidade da status bar via WindowInsets

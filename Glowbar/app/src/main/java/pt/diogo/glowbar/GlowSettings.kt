@@ -35,7 +35,12 @@ data class GlowSettings(
     val notificationGlow: Boolean = false,
     val notificationProgress: Boolean = false,
     val autoStart: Boolean = false,
-    val autoHideFullscreen: Boolean = true
+    val autoHideFullscreen: Boolean = true,
+
+    // Avisos persistentes das apps privadas
+    val pendingUntilOpened: Boolean = true,
+    val tapToOpen: Boolean = true,
+    val pendingTimeoutMin: Int = 0   // 0 = nunca expira
 )
 
 /**
@@ -72,7 +77,10 @@ class SettingsRepository(private val context: Context) {
         notificationGlow = prefs.getBoolean("notificationGlow", false),
         notificationProgress = prefs.getBoolean("notificationProgress", false),
         autoStart = prefs.getBoolean("autoStart", false),
-        autoHideFullscreen = prefs.getBoolean("autoHideFullscreen", true)
+        autoHideFullscreen = prefs.getBoolean("autoHideFullscreen", true),
+        pendingUntilOpened = prefs.getBoolean("pendingUntilOpened", true),
+        tapToOpen = prefs.getBoolean("tapToOpen", true),
+        pendingTimeoutMin = prefs.getInt("pendingTimeoutMin", 0)
     )
 
     fun save(s: GlowSettings) {
@@ -96,6 +104,9 @@ class SettingsRepository(private val context: Context) {
             putBoolean("notificationProgress", s.notificationProgress)
             putBoolean("autoStart", s.autoStart)
             putBoolean("autoHideFullscreen", s.autoHideFullscreen)
+            putBoolean("pendingUntilOpened", s.pendingUntilOpened)
+            putBoolean("tapToOpen", s.tapToOpen)
+            putInt("pendingTimeoutMin", s.pendingTimeoutMin)
         }.apply()
     }
 

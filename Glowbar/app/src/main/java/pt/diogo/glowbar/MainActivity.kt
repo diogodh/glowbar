@@ -1,11 +1,13 @@
 package pt.diogo.glowbar
 
 import android.Manifest
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -58,11 +60,24 @@ class MainActivity : ComponentActivity() {
                 colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
             ) {
                 Surface(Modifier.fillMaxSize()) {
-                    SettingsScreen(repo)
+                    var showPrivate by remember { mutableStateOf(false) }
+                    if (showPrivate) {
+                        PrivateAppsScreen(onBack = { showPrivate = false })
+                    } else {
+                        SettingsScreen(repo, onOpenPrivateApps = { showPrivate = true })
+                    }
                 }
             }
         }
     }
+}
+
+private fun hasUsageAccess(context: Context): Boolean {
+    val ops = context.getSystemService(AppOpsManager::class.java) ?: return false
+    val mode = ops.unsafeCheckOpNoThrow(
+        AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName
+    )
+    return mode == AppOpsManager.MODE_ALLOWED
 }
 
 private fun hasNotificationAccess(context: Context): Boolean =
@@ -71,7 +86,7 @@ private fun hasNotificationAccess(context: Context): Boolean =
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(repo: SettingsRepository) {
+fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
     val context = LocalContext.current
     var s by remember { mutableStateOf(repo.load()) }
 
@@ -256,6 +271,50 @@ fun SettingsScreen(repo: SettingsRepository) {
             "Oculta o glow durante vídeos e jogos em ecrã inteiro",
             s.autoHideFullscreen
         ) { apply(s.copy(autoHideFullscreen = it)) }
+
+        Section("Avisos das apps privadas")
+        ToggleRow(
+            "Manter aviso até abrir a app",
+            "A barra respira nas cores das apps com avisos por resolver, em vez " +
+                "de um flash que passa despercebido",
+            s.pendingUntilOpened
+        ) { apply(s.copy(pendingUntilOpened = it)) }
+
+        ToggleRow(
+            "Tocar na barra abre a app",
+            "Com avisos pendentes, um toque abre a app e limpa o sinal",
+            s.tapToOpen
+        ) { apply(s.copy(tapToOpen = it)) }
+
+        Stepper(
+            if (s.pendingTimeoutMin == 0) "Expirar sozinho: nunca"
+            else "Expirar sozinho: " + s.pendingTimeoutMin + " min",
+            s.pendingTimeoutMin
+        ) { apply(s.copy(pendingTimeoutMin = it.coerceIn(0, 120))) }
+
+        if (s.pendingUntilOpened && !hasUsageAccess(context)) {
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = {
+                    context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Permitir acesso ao histórico de utilização") }
+            Text(
+                "Necessário para a Glowbar perceber que abriste a app e apagar o aviso",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        Spacer(Modifier.height(20.dp))
+        OutlinedButton(
+            onClick = onOpenPrivateApps,
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Aplicações privadas…") }
+        Text(
+            "Notificações destas apps aparecem só na Glowbar, nunca no sistema",
+            style = MaterialTheme.typography.bodySmall
+        )
 
         if ((s.notificationGlow || s.notificationProgress) && !hasNotificationAccess(context)) {
             Spacer(Modifier.height(12.dp))

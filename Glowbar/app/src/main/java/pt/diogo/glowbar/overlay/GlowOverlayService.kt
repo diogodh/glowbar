@@ -4,7 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.AppOpsManager
 import android.app.Service
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -17,10 +20,12 @@ import android.graphics.drawable.Icon
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
+import android.os.Process
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
@@ -60,6 +65,10 @@ class GlowOverlayService : Service() {
 
     // Progresso por notificação (a mais recente ganha)
     private val progressMap = LinkedHashMap<String, Float>()
+
+    // Avisos por resolver: pacote -> cor do segmento
+    private val pending = LinkedHashMap<String, Int>()
+    private var pollScheduled = false
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -114,6 +123,7 @@ class GlowOverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        mainHandler.removeCallbacksAndMessages(null)
         glowView?.let { runCatching { wm.removeView(it) } }
         glowView = null
         runCatching { unregisterReceiver(batteryReceiver) }
@@ -154,7 +164,15 @@ class GlowOverlayService : Service() {
             insets
         }
 
+        v.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_UP && pending.isNotEmpty()) {
+                openMostRecentPending()
+            }
+            true
+        }
+
         wm.addView(v, buildParams(s))
+        pushPending()
         updateVisibility()
 
         // Estado inicial da bateria (broadcast sticky)
@@ -232,6 +250,113 @@ class GlowOverlayService : Service() {
                 glowView?.flash()
             }
         }
+    }
+
+    /**
+     * Notificação de uma app privada: só o sinal luminoso.
+     * Se "pendingUntilOpened" estiver ativo, o aviso fica a respirar na barra
+     * até abrires a app (ou tocares na barra); caso contrário é só um flash.
+     */
+    fun onPrivateNotification(color: Int?, pkg: String) {
+        mainHandler.post {
+            val s = settings ?: return@post
+            glowView?.flash(color)
+            if (!s.pendingUntilOpened) return@post
+
+            pending[pkg] = color ?: 0xFFFFFFFF.toInt()
+            pushPending()
+            startPolling()
+
+            if (s.pendingTimeoutMin > 0) {
+                mainHandler.postDelayed(
+                    { clearPending(pkg) },
+                    s.pendingTimeoutMin * 60_000L
+                )
+            }
+        }
+    }
+
+    private fun pushPending() {
+        glowView?.pendingColors = pending.values.toList()
+        updateTouchable()
+    }
+
+    fun clearPending(pkg: String) {
+        mainHandler.post {
+            if (pending.remove(pkg) != null) pushPending()
+        }
+    }
+
+    // ------------------------------------------- deteção da app em 1.º plano
+
+    private fun hasUsageAccess(): Boolean {
+        val ops = getSystemService(AppOpsManager::class.java) ?: return false
+        val mode = ops.unsafeCheckOpNoThrow(
+            AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName
+        )
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    @Suppress("DEPRECATION")
+    private fun foregroundPackage(): String? {
+        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
+        val now = System.currentTimeMillis()
+        val events = usm.queryEvents(now - 10_000L, now)
+        val ev = UsageEvents.Event()
+        var last: String? = null
+        while (events.hasNextEvent()) {
+            events.getNextEvent(ev)
+            if (ev.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) last = ev.packageName
+        }
+        return last
+    }
+
+    private val pollRunnable = object : Runnable {
+        override fun run() {
+            pollScheduled = false
+            if (pending.isEmpty()) return
+            if (hasUsageAccess()) {
+                foregroundPackage()?.let { fg ->
+                    if (pending.remove(fg) != null) pushPending()
+                }
+            }
+            if (pending.isNotEmpty()) startPolling()
+        }
+    }
+
+    private fun startPolling() {
+        if (pollScheduled || pending.isEmpty()) return
+        pollScheduled = true
+        mainHandler.postDelayed(pollRunnable, 1500L)
+    }
+
+    // ------------------------------------------------ toque para abrir a app
+
+    private fun updateTouchable() {
+        val v = glowView ?: return
+        val s = settings ?: return
+        val wantTouch = s.tapToOpen && pending.isNotEmpty()
+        val lp = (v.layoutParams as? WindowManager.LayoutParams) ?: return
+        val isTouchable = (lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
+        if (wantTouch == isTouchable) return
+
+        lp.flags = if (wantTouch) {
+            lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        } else {
+            lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        runCatching { wm.updateViewLayout(v, lp) }
+    }
+
+    private fun openMostRecentPending() {
+        val pkg = pending.keys.lastOrNull() ?: return
+        val launch = packageManager.getLaunchIntentForPackage(pkg)
+        if (launch != null) {
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { startActivity(launch) }
+        }
+        pending.remove(pkg)
+        pushPending()
     }
 
     fun onNotificationGone(key: String) {

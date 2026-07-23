@@ -45,7 +45,12 @@ class GlowView(context: Context) : View(context) {
     var cutoutRect: RectF? = null
         set(v) { field = v; invalidate() }
 
+    /** Cores das apps com aviso por resolver. Vazio = sem pendências. */
+    var pendingColors: List<Int> = emptyList()
+        set(v) { field = v; invalidate() }
+
     private var flashStart = 0L
+    private var flashColor = 0xFFFFFFFF.toInt()
     private var phase = 0f
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -93,7 +98,9 @@ class GlowView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun flash() {
+    /** color = null usa branco (flash genérico); apps privadas podem ter cor própria. */
+    fun flash(color: Int? = null) {
+        flashColor = color ?: 0xFFFFFFFF.toInt()
         flashStart = SystemClock.uptimeMillis()
         invalidate()
     }
@@ -112,6 +119,10 @@ class GlowView(context: Context) : View(context) {
     private fun dp(v: Float) = v * resources.displayMetrics.density
 
     private fun wave() = (sin(phase * 2.0 * PI).toFloat() + 1f) / 2f
+
+    /** Respiração desfasada, para os segmentos não pulsarem todos em uníssono. */
+    private fun waveAt(offset: Float) =
+        (sin((phase + offset) * 2.0 * PI).toFloat() + 1f) / 2f
 
     private fun flashLevel(): Float {
         if (flashStart == 0L) return 0f
@@ -188,7 +199,37 @@ class GlowView(context: Context) : View(context) {
             target.alpha = paintAlpha
         }
 
-        if (p != null) {
+        if (p == null && pendingColors.isNotEmpty()) {
+            // ------------------- avisos por resolver -------------------
+            val n = pendingColors.size
+            val gap = if (n > 1) dp(3f) else 0f
+            val total = if (horizontal) rect.width() else rect.height()
+            val segLen = (total - gap * (n - 1)) / n
+
+            pendingColors.forEachIndexed { i, c ->
+                val start = i * (segLen + gap)
+                val seg = if (horizontal)
+                    RectF(rect.left + start, rect.top, rect.left + start + segLen, rect.bottom)
+                else
+                    RectF(rect.left, rect.top + start, rect.right, rect.top + start + segLen)
+
+                val breath = 0.35f + 0.65f * waveAt(i.toFloat() / n)
+                val segAlpha = (255 * breath).toInt()
+
+                extraPaint.reset()
+                extraPaint.isAntiAlias = true
+                extraPaint.color = c
+                extraPaint.maskFilter = BlurMaskFilter(thick * 1.6f, BlurMaskFilter.Blur.NORMAL)
+                extraPaint.alpha = segAlpha / 2
+                canvas.drawRoundRect(seg, radius, radius, extraPaint)
+
+                extraPaint.reset()
+                extraPaint.isAntiAlias = true
+                extraPaint.color = c
+                extraPaint.alpha = segAlpha
+                canvas.drawRoundRect(seg, radius, radius, extraPaint)
+            }
+        } else if (p != null) {
             // ------------------- modo progresso -------------------
             // Trilho esbatido
             extraPaint.reset()
@@ -234,7 +275,7 @@ class GlowView(context: Context) : View(context) {
             flashRect.inset(-dp(2f), -dp(2f))
             extraPaint.reset()
             extraPaint.isAntiAlias = true
-            extraPaint.color = 0xFFFFFFFF.toInt()
+            extraPaint.color = flashColor
             extraPaint.maskFilter = BlurMaskFilter(thick * 1.2f + dp(4f), BlurMaskFilter.Blur.NORMAL)
             extraPaint.alpha = (200 * f).toInt()
             canvas.drawRoundRect(flashRect, radius, radius, extraPaint)
@@ -298,7 +339,37 @@ class GlowView(context: Context) : View(context) {
             target.alpha = paintAlpha
         }
 
-        if (p != null) {
+        if (p == null && pendingColors.isNotEmpty()) {
+            // Avisos por resolver: um arco por app, com respiração desfasada
+            val n = pendingColors.size
+            val gapDeg = if (n > 1) 6f else 0f
+            val sweep = (360f - gapDeg * n) / n
+
+            pendingColors.forEachIndexed { i, c ->
+                val startAngle = -90f + i * (sweep + gapDeg)
+                val breath = 0.35f + 0.65f * waveAt(i.toFloat() / n)
+                val segAlpha = (255 * breath).toInt()
+
+                extraPaint.reset()
+                extraPaint.isAntiAlias = true
+                extraPaint.style = Paint.Style.STROKE
+                extraPaint.strokeWidth = stroke
+                extraPaint.strokeCap = Paint.Cap.ROUND
+                extraPaint.color = c
+                extraPaint.maskFilter = BlurMaskFilter(stroke * 1.8f, BlurMaskFilter.Blur.NORMAL)
+                extraPaint.alpha = segAlpha / 2
+                canvas.drawArc(oval, startAngle, sweep, false, extraPaint)
+
+                extraPaint.reset()
+                extraPaint.isAntiAlias = true
+                extraPaint.style = Paint.Style.STROKE
+                extraPaint.strokeWidth = stroke
+                extraPaint.strokeCap = Paint.Cap.ROUND
+                extraPaint.color = c
+                extraPaint.alpha = segAlpha
+                canvas.drawArc(oval, startAngle, sweep, false, extraPaint)
+            }
+        } else if (p != null) {
             // Trilho esbatido + arco de progresso
             extraPaint.reset()
             extraPaint.isAntiAlias = true
@@ -338,7 +409,7 @@ class GlowView(context: Context) : View(context) {
             extraPaint.isAntiAlias = true
             extraPaint.style = Paint.Style.STROKE
             extraPaint.strokeWidth = stroke + dp(2f)
-            extraPaint.color = 0xFFFFFFFF.toInt()
+            extraPaint.color = flashColor
             extraPaint.maskFilter = BlurMaskFilter(stroke * 1.4f + dp(4f), BlurMaskFilter.Blur.NORMAL)
             extraPaint.alpha = (200 * f).toInt()
             canvas.drawOval(oval, extraPaint)
