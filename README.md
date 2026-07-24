@@ -106,6 +106,17 @@ e quase transparente (intensidade configurável, 0–60%) enquanto não há nada
 pendente, e só ganha cor e halo quando chega notificação de uma app escolhida.
 Nota: com este modo ligado, o indicador de bateria não colore a barra em repouso.
 
+## Se as apps privadas não fizerem nada
+
+O **acesso às notificações é obrigatório** para esta funcionalidade — sem ele o
+Android nem sequer liga o `NotificationListenerService`, portanto a app não fica
+a saber que a notificação existiu e não a consegue esconder nem acender a barra.
+O painel "Estado" no ecrã principal avisa quando falta.
+
+Nota: depois de **reinstalar o APK**, o Android por vezes desliga o acesso às
+notificações. Se deixar de funcionar após uma atualização, desliga e volta a
+ligar a Glowbar em Definições → Notificações → Acesso a notificações.
+
 ## Limitações conhecidas (v1)
 
 - **Autohide em fullscreen** usa a visibilidade da status bar via WindowInsets

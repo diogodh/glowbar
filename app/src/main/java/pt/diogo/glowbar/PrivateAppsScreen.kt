@@ -2,6 +2,7 @@ package pt.diogo.glowbar
 
 import android.content.Context
 import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -36,6 +38,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -81,6 +84,37 @@ fun PrivateAppsScreen(onBack: () -> Unit) {
                 "estado e sem pré-visualização no ecrã de bloqueio.",
             style = MaterialTheme.typography.bodySmall
         )
+        if (!NotificationManagerCompat.getEnabledListenerPackages(context)
+                .contains(context.packageName)
+        ) {
+            Spacer(Modifier.height(12.dp))
+            Card {
+                Column(Modifier.padding(12.dp)) {
+                    Text(
+                        "Falta o acesso às notificações",
+                        style = MaterialTheme.typography.titleSmall
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Sem esta permissão a app nunca chega a saber que a " +
+                            "notificação existiu, por isso não a consegue esconder " +
+                            "nem acender a barra. É obrigatória para esta " +
+                            "funcionalidade.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            context.startActivity(
+                                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Conceder acesso") }
+                }
+            }
+        }
+
         Spacer(Modifier.height(12.dp))
         Card {
             Text(

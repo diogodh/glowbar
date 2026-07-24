@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -113,9 +114,10 @@ fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
             } else {
                 svc.refresh()
             }
+            // Para o serviço clássico sem mexer na definição "enabled".
             context.startService(
                 Intent(context, GlowOverlayService::class.java)
-                    .setAction(GlowOverlayService.ACTION_TURN_OFF)
+                    .setAction(GlowOverlayService.ACTION_STOP_ONLY)
             )
             return
         }
@@ -155,6 +157,8 @@ fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
             )
             Switch(checked = s.enabled, onCheckedChange = { apply(s.copy(enabled = it)) })
         }
+
+        StatusPanel(s, context)
 
         Section("Forma")
         ChipRow(
@@ -375,17 +379,67 @@ fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
             style = MaterialTheme.typography.bodySmall
         )
 
-        if ((s.notificationGlow || s.notificationProgress) && !hasNotificationAccess(context)) {
-            Spacer(Modifier.height(12.dp))
-            OutlinedButton(
-                onClick = {
-                    context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Conceder acesso às notificações") }
-        }
-
         Spacer(Modifier.height(40.dp))
+    }
+}
+
+/**
+ * Mostra em texto claro o que falta para a app funcionar, em vez de falhar
+ * em silêncio. O acesso às notificações é obrigatório para as apps privadas,
+ * para o notification glow e para o notification progress.
+ */
+@Composable
+private fun StatusPanel(s: GlowSettings, context: Context) {
+    val rules = remember { AppRulesRepository(context) }
+    val privateCount = rules.privatePackages().size
+    val needsNotifAccess =
+        s.notificationGlow || s.notificationProgress || privateCount > 0
+    val hasNotif = hasNotificationAccess(context)
+    val a11yOn = GlowAccessibilityService.instance != null
+
+    val problems = mutableListOf<String>()
+    if (needsNotifAccess && !hasNotif) {
+        problems.add("Falta o acesso às notificações — sem ele as apps privadas e o glow de notificações não funcionam.")
+    }
+    if (s.accessibilityMode && !a11yOn) {
+        problems.add("O modo sem notificações está ligado, mas a Glowbar ainda não foi ativada nas definições de acessibilidade.")
+    }
+    if (!s.enabled) {
+        problems.add("A Glowbar está desligada no interruptor acima.")
+    }
+
+    if (problems.isEmpty()) return
+
+    Spacer(Modifier.height(16.dp))
+    Card {
+        Column(Modifier.padding(14.dp)) {
+            Text("Estado", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(6.dp))
+            problems.forEach {
+                Text("• " + it, style = MaterialTheme.typography.bodySmall)
+                Spacer(Modifier.height(4.dp))
+            }
+            if (needsNotifAccess && !hasNotif) {
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Conceder acesso às notificações") }
+            }
+            if (s.accessibilityMode && !a11yOn) {
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Abrir definições de acessibilidade") }
+            }
+        }
     }
 }
 

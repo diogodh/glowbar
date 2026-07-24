@@ -29,6 +29,8 @@ class GlowOverlayService : Service() {
         const val ACTION_HIDE = "pt.diogo.glowbar.HIDE"
         const val ACTION_SHOW = "pt.diogo.glowbar.SHOW"
         const val ACTION_TURN_OFF = "pt.diogo.glowbar.TURN_OFF"
+        /** Para o serviço sem alterar as definições (usado ao mudar de modo). */
+        const val ACTION_STOP_ONLY = "pt.diogo.glowbar.STOP_ONLY"
 
         const val CHANNEL_ID = "glowbar"
         const val NOTIF_ID = 1
@@ -52,6 +54,10 @@ class GlowOverlayService : Service() {
             ACTION_SHOW -> { c.hideTemporarily(false); startFg() }
             ACTION_TURN_OFF -> {
                 SettingsRepository(this).setEnabled(false)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_STOP_ONLY -> {
                 stopSelf()
                 return START_NOT_STICKY
             }
