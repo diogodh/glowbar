@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -44,6 +45,7 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import pt.diogo.glowbar.overlay.GlowController
 
 data class AppInfo(val pkg: String, val label: String)
 
@@ -70,9 +72,16 @@ fun PrivateAppsScreen(onBack: () -> Unit) {
 
     LaunchedEffect(Unit) { apps = loadApps(context) }
 
-    val visible = apps.filter { it.label.contains(filter, ignoreCase = true) }
+    val visible = apps.filter {
+        it.label.contains(filter, ignoreCase = true) ||
+            it.pkg.contains(filter, ignoreCase = true)
+    }
 
-    Column(Modifier.padding(horizontal = 20.dp)) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp)
+    ) {
         Spacer(Modifier.height(20.dp))
         TextButton(onClick = onBack) { Text("‹ Voltar") }
 
@@ -157,8 +166,9 @@ fun PrivateAppsScreen(onBack: () -> Unit) {
 
                     Switch(
                         checked = isOn,
-                        onCheckedChange = {
-                            rules.setPrivate(app.pkg, it)
+                        onCheckedChange = { enabled ->
+                            rules.setPrivate(app.pkg, enabled)
+                            if (!enabled) GlowController.active?.clearPending(app.pkg)
                             selected = rules.privatePackages()
                         }
                     )
@@ -186,6 +196,10 @@ fun PrivateAppsScreen(onBack: () -> Unit) {
                                 .fillMaxWidth()
                                 .clickable {
                                     rules.setColor(app.pkg, value)
+                                    GlowController.active?.updatePendingColor(
+                                        app.pkg,
+                                        if (value == 0) null else value
+                                    )
                                     version++
                                     colorDialogFor = null
                                 }
@@ -200,6 +214,13 @@ fun PrivateAppsScreen(onBack: () -> Unit) {
             },
             confirmButton = {
                 TextButton(onClick = { colorDialogFor = null }) { Text("Fechar") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        GlowController.active?.previewNotification(rules.colorFor(app.pkg))
+                    }
+                ) { Text("Testar") }
             }
         )
     }

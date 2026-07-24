@@ -50,8 +50,18 @@ class GlowOverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val c = controller ?: return START_NOT_STICKY
         when (intent?.action) {
-            ACTION_HIDE -> { c.hideTemporarily(true); startFg() }
-            ACTION_SHOW -> { c.hideTemporarily(false); startFg() }
+            ACTION_HIDE -> {
+                startFg()
+                if (GlowController.active !== c) c.start()
+                c.hideTemporarily(true)
+                startFg() // atualiza texto e ação para “Mostrar”
+            }
+            ACTION_SHOW -> {
+                startFg()
+                if (GlowController.active !== c) c.start()
+                c.hideTemporarily(false)
+                startFg() // atualiza texto e ação para “Esconder”
+            }
             ACTION_TURN_OFF -> {
                 SettingsRepository(this).setEnabled(false)
                 stopSelf()

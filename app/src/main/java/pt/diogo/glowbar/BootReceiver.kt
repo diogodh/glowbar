@@ -11,11 +11,25 @@ import pt.diogo.glowbar.overlay.GlowOverlayService
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-        val s = SettingsRepository(context).load()
-        if (s.enabled && s.autoStart && Settings.canDrawOverlays(context)) {
-            val i = Intent(context, GlowOverlayService::class.java)
-                .setAction(GlowOverlayService.ACTION_START)
-            ContextCompat.startForegroundService(context, i)
+
+        val repo = SettingsRepository(context)
+        val settings = repo.load()
+
+        // "Arrancar após reiniciar" desligado significa começar efetivamente
+        // desligada, inclusive no modo de acessibilidade.
+        if (!settings.autoStart) {
+            repo.setEnabled(false)
+            return
         }
+
+        if (!settings.enabled || settings.accessibilityMode) return
+        if (!Settings.canDrawOverlays(context)) {
+            repo.setEnabled(false)
+            return
+        }
+
+        val serviceIntent = Intent(context, GlowOverlayService::class.java)
+            .setAction(GlowOverlayService.ACTION_START)
+        ContextCompat.startForegroundService(context, serviceIntent)
     }
 }

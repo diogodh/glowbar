@@ -12,9 +12,6 @@ import pt.diogo.glowbar.SettingsRepository
  * sem a permissão SYSTEM_ALERT_WINDOW — e é essa permissão que faz o Android
  * mostrar o aviso "está a sobrepor-se a outras apps". Como também não é preciso
  * um foreground service, desaparecem as duas notificações.
- *
- * Bónus: o próprio serviço reporta a app em primeiro plano, pelo que deixa de
- * ser necessária a permissão de acesso ao histórico de utilização.
  */
 class GlowAccessibilityService : AccessibilityService() {
 
@@ -30,13 +27,16 @@ class GlowAccessibilityService : AccessibilityService() {
         )
         c.foregroundFromAccessibility = true
         controller = c
-        if (SettingsRepository(this).load().enabled) c.start()
+
+        val settings = SettingsRepository(this).load()
+        if (settings.enabled && settings.accessibilityMode) c.start()
     }
 
     /** Chamado pela MainActivity quando as definições mudam. */
     fun refresh() {
         val c = controller ?: return
-        if (SettingsRepository(this).load().enabled) {
+        val settings = SettingsRepository(this).load()
+        if (settings.enabled && settings.accessibilityMode) {
             if (GlowController.active !== c) c.start() else c.rebuild()
         } else {
             stopOverlay()
@@ -49,12 +49,20 @@ class GlowAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val e = event ?: return
-        if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            e.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
+        ) return
+
+        val settings = SettingsRepository(this).load()
+        if (!settings.enabled || !settings.accessibilityMode) return
+
+        val c = controller ?: return
+        if (GlowController.active !== c) return
         val pkg = e.packageName?.toString() ?: return
-        GlowController.active?.onForegroundApp(pkg)
+        c.onForegroundApp(pkg)
     }
 
-    override fun onInterrupt() {}
+    override fun onInterrupt() = Unit
 
     override fun onDestroy() {
         stopOverlay()
@@ -66,5 +74,6 @@ class GlowAccessibilityService : AccessibilityService() {
     companion object {
         @Volatile
         var instance: GlowAccessibilityService? = null
+            private set
     }
 }

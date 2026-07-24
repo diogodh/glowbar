@@ -1,4 +1,4 @@
-# Glowbar (clone pessoal)
+# Glowbar 1.1.0 (clone pessoal)
 
 Overlay luminoso persistente para Android — barra numa margem do ecrã ou anel
 em redor da câmara frontal — com animações Flow/Pulse/Breathe, indicador de
@@ -45,6 +45,9 @@ Em **Aplicações privadas…** escolhes as apps cujas notificações devem ser
 removidas do sistema mal chegam: sem ícone na barra de estado, sem
 pré-visualização no ecrã de bloqueio, sem entrada no painel. Fica apenas o
 flash da Glowbar, com cor à tua escolha por aplicação.
+
+No diálogo de cor, o botão **Testar** permite confirmar imediatamente o flash
+sem criar nem cancelar uma notificação real.
 
 ### Aviso persistente
 
@@ -105,6 +108,17 @@ Em **Aparência em repouso → Apagar quando não há avisos**, a barra fica cin
 e quase transparente (intensidade configurável, 0–60%) enquanto não há nada
 pendente, e só ganha cor e halo quando chega notificação de uma app escolhida.
 Nota: com este modo ligado, o indicador de bateria não colore a barra em repouso.
+
+## Anel do cutout: 1.00x/1.00x é sempre um círculo
+
+O `boundingRect` que o Android reporta para o punch-hole da câmara frontal
+pode ter largura e altura ligeiramente diferentes mesmo em câmaras
+verdadeiramente circulares (uma particularidade de alguns fabricantes). Por
+isso o raio base do anel usa sempre a **largura** do cutout detetado para as
+duas dimensões — a 1.00x/1.00x o resultado é sempre um círculo perfeito.
+`Escala horizontal`/`Escala vertical` continuam disponíveis para ajustares
+manualmente formas realmente ovais (câmaras "pill") ou fazeres correções
+finas.
 
 ## Se as apps privadas não fizerem nada
 

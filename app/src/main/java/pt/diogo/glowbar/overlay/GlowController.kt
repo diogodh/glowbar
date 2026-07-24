@@ -15,15 +15,18 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import pt.diogo.glowbar.AppRulesRepository
 import pt.diogo.glowbar.GlowSettings
 import pt.diogo.glowbar.Position
 import pt.diogo.glowbar.SettingsRepository
 import pt.diogo.glowbar.Shape
+import kotlin.math.max
 
 /**
  * Toda a lógica do overlay, independente de quem o hospeda.
@@ -38,14 +41,30 @@ class GlowController(
     private val onStopRequested: () -> Unit
 ) {
 
+    private data class PendingAlert(
+        val color: Int?,
+        val receivedAt: Long
+    )
+
+    private data class ForegroundEvent(
+        val pkg: String,
+        val timestamp: Long
+    )
+
     companion object {
+        private const val TAG = "GlowController"
+        private const val USAGE_POLL_MS = 1500L
+        private const val USAGE_QUERY_OVERLAP_MS = 1000L
+
         /** Controlador ativo, seja qual for o serviço que o hospeda. */
         @Volatile
         var active: GlowController? = null
+            private set
     }
 
     private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private val repo = SettingsRepository(context)
+    private val rulesRepo = AppRulesRepository(context)
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var glowView: GlowView? = null
@@ -57,10 +76,14 @@ class GlowController(
 
     private var hiddenTemp = false
     private var hiddenFullscreen = false
+    private var receiverRegistered = false
 
     private val progressMap = LinkedHashMap<String, Float>()
-    private val pending = LinkedHashMap<String, Int>()
+    private val pending = LinkedHashMap<String, PendingAlert>()
+    private val pendingTimeouts = mutableMapOf<String, Runnable>()
+    private var pendingLoaded = false
     private var pollScheduled = false
+    private var lastUsageQueryAt = 0L
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -69,25 +92,42 @@ class GlowController(
             val status = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
             glowView?.batteryLevel = if (level >= 0 && scale > 0) level.toFloat() / scale else 1f
             glowView?.charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                    status == BatteryManager.BATTERY_STATUS_FULL
+                status == BatteryManager.BATTERY_STATUS_FULL
         }
     }
 
     // ------------------------------------------------------------ ciclo de vida
 
     fun start() {
-        active = this
-        runCatching {
-            context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val previous = active
+        if (previous !== null && previous !== this) previous.stop()
+
+        if (!receiverRegistered) {
+            runCatching {
+                context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                receiverRegistered = true
+            }.onFailure { Log.w(TAG, "Não foi possível registar o estado da bateria", it) }
         }
+
         rebuild()
     }
 
     fun stop() {
         mainHandler.removeCallbacksAndMessages(null)
-        glowView?.let { runCatching { wm.removeView(it) } }
+        pendingTimeouts.clear()
+        pollScheduled = false
+
+        glowView?.let { view ->
+            runCatching { wm.removeView(view) }
+                .onFailure { Log.w(TAG, "Falha ao remover o overlay", it) }
+        }
         glowView = null
-        runCatching { context.unregisterReceiver(batteryReceiver) }
+
+        if (receiverRegistered) {
+            runCatching { context.unregisterReceiver(batteryReceiver) }
+            receiverRegistered = false
+        }
+
         if (active === this) active = null
     }
 
@@ -99,26 +139,32 @@ class GlowController(
     fun isHiddenTemporarily() = hiddenTemp
 
     fun rebuild() {
-        val s = repo.load()
-        settings = s
+        val newSettings = repo.load()
+        val oldSettings = settings
+        settings = newSettings
 
-        // Com TYPE_APPLICATION_OVERLAY é preciso a permissão; com acessibilidade não.
-        val needsOverlayPermission = windowType == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        if (!s.enabled || (needsOverlayPermission && !Settings.canDrawOverlays(context))) {
+        val needsOverlayPermission =
+            windowType == WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        if (!newSettings.enabled ||
+            (needsOverlayPermission && !Settings.canDrawOverlays(context))
+        ) {
+            if (active === this) active = null
             onStopRequested()
             return
         }
 
-        glowView?.let { runCatching { wm.removeView(it) } }
+        syncPendingWithSettings(newSettings)
 
-        val v = GlowView(context)
-        v.applySettings(s)
-        glowView = v
+        val oldView = glowView
+        val newView = GlowView(context).apply {
+            applySettings(newSettings)
+            progress = progressMap.values.lastOrNull()
+        }
 
-        v.setOnApplyWindowInsetsListener { _, insets ->
+        newView.setOnApplyWindowInsetsListener { _, insets ->
             if (Build.VERSION.SDK_INT >= 28) {
                 val r = insets.displayCutout?.boundingRects?.firstOrNull()
-                v.cutoutRect = r?.let { RectF(it) }
+                newView.cutoutRect = r?.let { RectF(it) }
             }
             if (Build.VERSION.SDK_INT >= 30) {
                 val fullscreen = !insets.isVisible(WindowInsets.Type.statusBars())
@@ -131,17 +177,46 @@ class GlowController(
             insets
         }
 
-        v.setOnTouchListener { _, event ->
+        newView.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_UP && pending.isNotEmpty()) {
                 openMostRecentPending()
             }
             true
         }
 
-        runCatching { wm.addView(v, buildParams(s)) }
+        // Mantém a vista antiga até sabermos que a nova foi adicionada com sucesso.
+        // Assim uma alteração inválida não deixa a app a suprimir notificações sem glow.
+        glowView = newView
+        val added = runCatching {
+            wm.addView(newView, buildParams(newSettings))
+        }.onFailure {
+            Log.e(TAG, "Não foi possível adicionar o overlay", it)
+        }.isSuccess
+
+        if (!added) {
+            glowView = oldView
+            settings = oldSettings
+            if (oldView == null) {
+                if (active === this) active = null
+                onStopRequested()
+            }
+            return
+        }
+
+        oldView?.let { view ->
+            runCatching { wm.removeView(view) }
+                .onFailure { Log.w(TAG, "Falha ao substituir a vista antiga", it) }
+        }
+
+        active = this
         pushPending()
         updateVisibility()
+        refreshBatteryState()
 
+        if (pending.isNotEmpty() && !foregroundFromAccessibility) startPolling()
+    }
+
+    private fun refreshBatteryState() {
         runCatching {
             context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         }.getOrNull()?.let { batteryReceiver.onReceive(context, it) }
@@ -153,9 +228,9 @@ class GlowController(
 
     private fun buildParams(s: GlowSettings): WindowManager.LayoutParams {
         val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+            WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         val pad = dpToPx(GlowView.PAD_DP)
 
         val lp: WindowManager.LayoutParams
@@ -166,7 +241,9 @@ class GlowController(
             lp = WindowManager.LayoutParams(
                 if (horizontal) len else cross,
                 if (horizontal) cross else len,
-                windowType, flags, PixelFormat.TRANSLUCENT
+                windowType,
+                flags,
+                PixelFormat.TRANSLUCENT
             )
             lp.gravity = when (s.position) {
                 Position.TOP -> Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -185,7 +262,9 @@ class GlowController(
             lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 dpToPx(240),
-                windowType, flags, PixelFormat.TRANSLUCENT
+                windowType,
+                flags,
+                PixelFormat.TRANSLUCENT
             )
             lp.gravity = Gravity.TOP
         }
@@ -209,7 +288,8 @@ class GlowController(
             val s = settings ?: return@post
             if (progress != null) {
                 if (!s.notificationProgress) return@post
-                if (progress >= 1f) progressMap.remove(key) else progressMap[key] = progress
+                progressMap.remove(key)
+                if (progress < 1f) progressMap[key] = progress
                 glowView?.progress = progressMap.values.lastOrNull()
             } else {
                 if (!s.notificationGlow) return@post
@@ -225,37 +305,136 @@ class GlowController(
         }
     }
 
+    /** Pré-visualização manual, sem criar nem suprimir uma notificação. */
+    fun previewNotification(color: Int?) {
+        mainHandler.post { glowView?.flash(color) }
+    }
+
     fun onPrivateNotification(color: Int?, pkg: String) {
-        mainHandler.post {
-            val s = settings ?: return@post
-            glowView?.flash(color)
-            if (!s.pendingUntilOpened) return@post
-
-            pending[pkg] = color ?: 0xFFFFFFFF.toInt()
-            pushPending()
-            if (!foregroundFromAccessibility) startPolling()
-
-            if (s.pendingTimeoutMin > 0) {
-                mainHandler.postDelayed({ clearPending(pkg) }, s.pendingTimeoutMin * 60_000L)
-            }
+        // NotificationListenerService entrega normalmente este callback na main
+        // thread. Nesse caso persiste o aviso antes de a notificação ser cancelada,
+        // reduzindo a janela em que uma recriação do processo faria perder o único
+        // sinal visível. Se algum OEM chamar noutra thread, volta à main thread.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            handlePrivateNotification(color, pkg)
+        } else {
+            mainHandler.post { handlePrivateNotification(color, pkg) }
         }
     }
 
+    private fun handlePrivateNotification(color: Int?, pkg: String) {
+        val s = settings ?: return
+        glowView?.flash(color)
+        if (!s.pendingUntilOpened) return
+
+        val now = System.currentTimeMillis()
+        pendingTimeouts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
+        pending.remove(pkg)
+        pending[pkg] = PendingAlert(color = color, receivedAt = now)
+        rulesRepo.upsertPending(pkg, now, color)
+
+        if (lastUsageQueryAt == 0L) {
+            lastUsageQueryAt = max(0L, now - USAGE_QUERY_OVERLAP_MS)
+        }
+
+        schedulePendingTimeout(pkg, s)
+        pushPending()
+        if (!foregroundFromAccessibility) startPolling()
+    }
+
+    fun updatePendingColor(pkg: String, color: Int?) {
+        mainHandler.post {
+            val current = pending[pkg] ?: return@post
+            pending[pkg] = current.copy(color = color)
+            rulesRepo.updatePendingColor(pkg, color)
+            pushPending()
+        }
+    }
+
+    private fun syncPendingWithSettings(s: GlowSettings) {
+        if (!pendingLoaded) {
+            val privatePackages = rulesRepo.privatePackages()
+            rulesRepo.pendingAlerts()
+                .sortedBy { it.receivedAt }
+                .forEach { record ->
+                    val stillValid = record.pkg in privatePackages &&
+                        context.packageManager.getLaunchIntentForPackage(record.pkg) != null
+                    if (stillValid) {
+                        pending[record.pkg] = PendingAlert(record.color, record.receivedAt)
+                    } else {
+                        rulesRepo.removePending(record.pkg)
+                    }
+                }
+            pendingLoaded = true
+            pending.values.minOfOrNull { it.receivedAt }?.let {
+                lastUsageQueryAt = max(0L, it - USAGE_QUERY_OVERLAP_MS)
+            }
+        }
+
+        if (!s.pendingUntilOpened) {
+            clearAllPendingInternal()
+            return
+        }
+
+        pending.keys.toList().forEach { schedulePendingTimeout(it, s) }
+    }
+
+    private fun schedulePendingTimeout(pkg: String, s: GlowSettings) {
+        pendingTimeouts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
+        if (s.pendingTimeoutMin <= 0) return
+
+        val alert = pending[pkg] ?: return
+        val expiresAt = alert.receivedAt + s.pendingTimeoutMin * 60_000L
+        val delay = expiresAt - System.currentTimeMillis()
+        if (delay <= 0L) {
+            removePendingInternal(pkg)
+            return
+        }
+
+        val expectedReceivedAt = alert.receivedAt
+        val runnable = Runnable {
+            pendingTimeouts.remove(pkg)
+            if (pending[pkg]?.receivedAt == expectedReceivedAt) {
+                removePendingInternal(pkg)
+            }
+        }
+        pendingTimeouts[pkg] = runnable
+        mainHandler.postDelayed(runnable, delay)
+    }
+
     private fun pushPending() {
-        glowView?.pendingColors = pending.values.toList()
+        glowView?.pendingColors = pending.values.map { it.color }
         updateTouchable()
     }
 
     fun clearPending(pkg: String) {
-        mainHandler.post {
-            if (pending.remove(pkg) != null) pushPending()
-        }
+        mainHandler.post { removePendingInternal(pkg) }
     }
 
-    /** Chamado pelo serviço de acessibilidade sempre que muda a app em primeiro plano. */
+    private fun removePendingInternal(pkg: String, push: Boolean = true): Boolean {
+        if (!pending.containsKey(pkg)) return false
+        pending.remove(pkg)
+        pendingTimeouts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
+        rulesRepo.removePending(pkg)
+        if (push) pushPending()
+        return true
+    }
+
+    private fun clearAllPendingInternal() {
+        pendingTimeouts.values.forEach { mainHandler.removeCallbacks(it) }
+        pendingTimeouts.clear()
+        pending.clear()
+        rulesRepo.clearPending()
+        pushPending()
+    }
+
+    /** Chamado pelo serviço de acessibilidade quando muda a app em primeiro plano. */
     fun onForegroundApp(pkg: String) {
         mainHandler.post {
-            if (pending.remove(pkg) != null) pushPending()
+            val alert = pending[pkg] ?: return@post
+            if (System.currentTimeMillis() >= alert.receivedAt) {
+                removePendingInternal(pkg)
+            }
         }
     }
 
@@ -264,33 +443,56 @@ class GlowController(
     private fun hasUsageAccess(): Boolean {
         val ops = context.getSystemService(AppOpsManager::class.java) ?: return false
         return ops.unsafeCheckOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName
+            AppOpsManager.OPSTR_GET_USAGE_STATS,
+            Process.myUid(),
+            context.packageName
         ) == AppOpsManager.MODE_ALLOWED
     }
 
-    @Suppress("DEPRECATION")
-    private fun foregroundPackage(): String? {
-        val usm = context.getSystemService(UsageStatsManager::class.java) ?: return null
-        val now = System.currentTimeMillis()
-        val events = usm.queryEvents(now - 10_000L, now)
-        val ev = UsageEvents.Event()
-        var last: String? = null
-        while (events.hasNextEvent()) {
-            events.getNextEvent(ev)
-            if (ev.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) last = ev.packageName
+    private fun foregroundEvents(from: Long, to: Long): List<ForegroundEvent> {
+        val usm = context.getSystemService(UsageStatsManager::class.java) ?: return emptyList()
+        val events = usm.queryEvents(from, to)
+        val event = UsageEvents.Event()
+        return buildList {
+            while (events.hasNextEvent()) {
+                events.getNextEvent(event)
+                val movedToForeground =
+                    event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
+                        event.eventType == UsageEvents.Event.ACTIVITY_RESUMED
+                val pkg = event.packageName
+                if (movedToForeground && !pkg.isNullOrBlank()) {
+                    add(ForegroundEvent(pkg, event.timeStamp))
+                }
+            }
         }
-        return last
     }
 
     private val pollRunnable = object : Runnable {
         override fun run() {
             pollScheduled = false
             if (pending.isEmpty()) return
+
             if (hasUsageAccess()) {
-                foregroundPackage()?.let { fg ->
-                    if (pending.remove(fg) != null) pushPending()
+                val now = System.currentTimeMillis()
+                val oldestPending = pending.values.minOfOrNull { it.receivedAt } ?: now
+                val from = max(
+                    0L,
+                    minOf(lastUsageQueryAt.takeIf { it > 0L } ?: oldestPending, oldestPending) -
+                        USAGE_QUERY_OVERLAP_MS
+                )
+
+                foregroundEvents(from, now).forEach { event ->
+                    val alert = pending[event.pkg]
+                    // Só limpa se a app tiver passado para primeiro plano DEPOIS
+                    // desta notificação; eventos antigos não podem apagar avisos novos.
+                    if (alert != null && event.timestamp >= alert.receivedAt) {
+                        removePendingInternal(event.pkg, push = false)
+                    }
                 }
+                lastUsageQueryAt = now
+                pushPending()
             }
+
             if (pending.isNotEmpty()) startPolling()
         }
     }
@@ -298,16 +500,16 @@ class GlowController(
     private fun startPolling() {
         if (pollScheduled || pending.isEmpty()) return
         pollScheduled = true
-        mainHandler.postDelayed(pollRunnable, 1500L)
+        mainHandler.postDelayed(pollRunnable, USAGE_POLL_MS)
     }
 
     // -------------------------------------------------------- toque para abrir
 
     private fun updateTouchable() {
-        val v = glowView ?: return
+        val view = glowView ?: return
         val s = settings ?: return
         val wantTouch = s.tapToOpen && pending.isNotEmpty()
-        val lp = (v.layoutParams as? WindowManager.LayoutParams) ?: return
+        val lp = (view.layoutParams as? WindowManager.LayoutParams) ?: return
         val isTouchable = (lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
         if (wantTouch == isTouchable) return
 
@@ -316,16 +518,15 @@ class GlowController(
         } else {
             lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
-        runCatching { wm.updateViewLayout(v, lp) }
+        runCatching { wm.updateViewLayout(view, lp) }
+            .onFailure { Log.w(TAG, "Não foi possível atualizar o toque do overlay", it) }
     }
 
     private fun openMostRecentPending() {
         val pkg = pending.keys.lastOrNull() ?: return
-        context.packageManager.getLaunchIntentForPackage(pkg)?.let {
-            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            runCatching { context.startActivity(it) }
-        }
-        pending.remove(pkg)
-        pushPending()
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg) ?: return
+        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val opened = runCatching { context.startActivity(launchIntent) }.isSuccess
+        if (opened) removePendingInternal(pkg)
     }
 }

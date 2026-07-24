@@ -46,11 +46,11 @@ class GlowView(context: Context) : View(context) {
         set(v) { field = v; invalidate() }
 
     /** Cores das apps com aviso por resolver. Vazio = sem pendências. */
-    var pendingColors: List<Int> = emptyList()
+    var pendingColors: List<Int?> = emptyList()
         set(v) { field = v; invalidate() }
 
     private var flashStart = 0L
-    private var flashColor = 0xFFFFFFFF.toInt()
+    private var flashColor: Int? = null
     private var phase = 0f
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -98,11 +98,11 @@ class GlowView(context: Context) : View(context) {
         invalidate()
     }
 
-    /** color = null usa branco (flash genérico); apps privadas podem ter cor própria. */
+    /** color = null usa o gradiente normal; apps privadas podem ter cor própria. */
     fun flash(color: Int? = null) {
-        flashColor = color ?: 0xFFFFFFFF.toInt()
+        flashColor = color
         flashStart = SystemClock.uptimeMillis()
-        invalidate()
+        postInvalidateOnAnimation()
     }
 
     override fun onAttachedToWindow() {
@@ -206,12 +206,47 @@ class GlowView(context: Context) : View(context) {
             target.alpha = paintAlpha
         }
 
-        if (p == null && pendingColors.isNotEmpty()) {
+        fun prepareAlertPaint(
+            target: Paint,
+            color: Int?,
+            area: RectF,
+            blur: Float?,
+            paintAlpha: Int
+        ) {
+            target.reset()
+            target.isAntiAlias = true
+            target.style = Paint.Style.FILL
+            if (color != null) {
+                target.color = color
+            } else {
+                val alertGradient = LinearGradient(
+                    area.left,
+                    area.top,
+                    if (horizontal) area.right else area.left,
+                    if (horizontal) area.top else area.bottom,
+                    COLORS,
+                    null,
+                    Shader.TileMode.REPEAT
+                )
+                if (s.animMode == AnimMode.FLOW) {
+                    shaderMatrix.reset()
+                    val shift = phase * (if (horizontal) area.width() else area.height())
+                    if (horizontal) shaderMatrix.setTranslate(shift, 0f)
+                    else shaderMatrix.setTranslate(0f, shift)
+                    alertGradient.setLocalMatrix(shaderMatrix)
+                }
+                target.shader = alertGradient
+            }
+            if (blur != null) target.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
+            target.alpha = paintAlpha.coerceIn(0, 255)
+        }
+
+        if (pendingColors.isNotEmpty()) {
             // ------------------- avisos por resolver -------------------
             val n = pendingColors.size
-            val gap = if (n > 1) dp(3f) else 0f
             val total = if (horizontal) rect.width() else rect.height()
-            val segLen = (total - gap * (n - 1)) / n
+            val gap = if (n > 1) minOf(dp(3f), total / (n * 3f)) else 0f
+            val segLen = ((total - gap * (n - 1)) / n).coerceAtLeast(dp(1f))
 
             pendingColors.forEachIndexed { i, c ->
                 val start = i * (segLen + gap)
@@ -223,17 +258,10 @@ class GlowView(context: Context) : View(context) {
                 val breath = 0.35f + 0.65f * waveAt(i.toFloat() / n)
                 val segAlpha = (255 * breath).toInt()
 
-                extraPaint.reset()
-                extraPaint.isAntiAlias = true
-                extraPaint.color = c
-                extraPaint.maskFilter = BlurMaskFilter(thick * 1.6f, BlurMaskFilter.Blur.NORMAL)
-                extraPaint.alpha = segAlpha / 2
+                prepareAlertPaint(extraPaint, c, seg, thick * 1.6f, segAlpha / 2)
                 canvas.drawRoundRect(seg, radius, radius, extraPaint)
 
-                extraPaint.reset()
-                extraPaint.isAntiAlias = true
-                extraPaint.color = c
-                extraPaint.alpha = segAlpha
+                prepareAlertPaint(extraPaint, c, seg, null, segAlpha)
                 canvas.drawRoundRect(seg, radius, radius, extraPaint)
             }
         } else if (p != null) {
@@ -283,17 +311,29 @@ class GlowView(context: Context) : View(context) {
             }
         }
 
-        // Flash de notificação
+        // Flash de notificação: desenha halo E corpo colorido. No modo de
+        // repouso transparente, isto garante que a barra ganha realmente cor.
         val f = flashLevel()
         if (f > 0f) {
             val flashRect = RectF(rect)
             flashRect.inset(-dp(2f), -dp(2f))
-            extraPaint.reset()
-            extraPaint.isAntiAlias = true
-            extraPaint.color = flashColor
-            extraPaint.maskFilter = BlurMaskFilter(thick * 1.2f + dp(4f), BlurMaskFilter.Blur.NORMAL)
-            extraPaint.alpha = (200 * f).toInt()
+            prepareAlertPaint(
+                extraPaint,
+                flashColor,
+                flashRect,
+                thick * 1.2f + dp(4f),
+                (210 * f).toInt()
+            )
             canvas.drawRoundRect(flashRect, radius, radius, extraPaint)
+
+            prepareAlertPaint(
+                extraPaint,
+                flashColor,
+                rect,
+                null,
+                (255 * f).toInt()
+            )
+            canvas.drawRoundRect(rect, radius, radius, extraPaint)
         }
     }
 
@@ -319,9 +359,16 @@ class GlowView(context: Context) : View(context) {
             else -> {}
         }
 
+        // Usa só a largura como referência do raio base. O Android por vezes
+        // reporta o boundingRect do punch-hole com largura e altura ligeiramente
+        // diferentes mesmo para câmaras circulares; se rx e ry partissem de
+        // width/height respetivamente, 1.00x/1.00x podia sair uma oval em vez
+        // de um círculo. hScale/vScale continuam a servir para ajustar formas
+        // realmente ovais (pill) ou fazer correções finas.
         val margin = stroke / 2f + dp(2f)
-        val rx = (base.width() / 2f + margin) * s.hScale
-        val ry = (base.height() / 2f + margin) * s.vScale
+        val baseRadius = base.width() / 2f + margin
+        val rx = baseRadius * s.hScale
+        val ry = baseRadius * s.vScale
         val oval = RectF(cx - rx, cy - ry, cx + rx, cy + ry)
 
         val p = progress
@@ -354,34 +401,54 @@ class GlowView(context: Context) : View(context) {
             target.alpha = paintAlpha
         }
 
-        if (p == null && pendingColors.isNotEmpty()) {
+        fun prepareAlertStroke(
+            target: Paint,
+            color: Int?,
+            blur: Float?,
+            paintAlpha: Int,
+            width: Float
+        ) {
+            target.reset()
+            target.isAntiAlias = true
+            target.style = Paint.Style.STROKE
+            target.strokeWidth = width
+            target.strokeCap = Paint.Cap.ROUND
+            if (color != null) {
+                target.color = color
+            } else {
+                val alertGradient = SweepGradient(cx, cy, COLORS, null)
+                if (s.animMode == AnimMode.FLOW) {
+                    shaderMatrix.reset()
+                    shaderMatrix.setRotate(phase * 360f, cx, cy)
+                    alertGradient.setLocalMatrix(shaderMatrix)
+                }
+                target.shader = alertGradient
+            }
+            if (blur != null) target.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
+            target.alpha = paintAlpha.coerceIn(0, 255)
+        }
+
+        if (pendingColors.isNotEmpty()) {
             // Avisos por resolver: um arco por app, com respiração desfasada
             val n = pendingColors.size
-            val gapDeg = if (n > 1) 6f else 0f
-            val sweep = (360f - gapDeg * n) / n
+            val gapDeg = if (n > 1) minOf(6f, 180f / n) else 0f
+            val sweep = ((360f - gapDeg * n) / n).coerceAtLeast(1f)
 
             pendingColors.forEachIndexed { i, c ->
                 val startAngle = -90f + i * (sweep + gapDeg)
                 val breath = 0.35f + 0.65f * waveAt(i.toFloat() / n)
                 val segAlpha = (255 * breath).toInt()
 
-                extraPaint.reset()
-                extraPaint.isAntiAlias = true
-                extraPaint.style = Paint.Style.STROKE
-                extraPaint.strokeWidth = stroke
-                extraPaint.strokeCap = Paint.Cap.ROUND
-                extraPaint.color = c
-                extraPaint.maskFilter = BlurMaskFilter(stroke * 1.8f, BlurMaskFilter.Blur.NORMAL)
-                extraPaint.alpha = segAlpha / 2
+                prepareAlertStroke(
+                    extraPaint,
+                    c,
+                    stroke * 1.8f,
+                    segAlpha / 2,
+                    stroke
+                )
                 canvas.drawArc(oval, startAngle, sweep, false, extraPaint)
 
-                extraPaint.reset()
-                extraPaint.isAntiAlias = true
-                extraPaint.style = Paint.Style.STROKE
-                extraPaint.strokeWidth = stroke
-                extraPaint.strokeCap = Paint.Cap.ROUND
-                extraPaint.color = c
-                extraPaint.alpha = segAlpha
+                prepareAlertStroke(extraPaint, c, null, segAlpha, stroke)
                 canvas.drawArc(oval, startAngle, sweep, false, extraPaint)
             }
         } else if (p != null) {
@@ -425,16 +492,25 @@ class GlowView(context: Context) : View(context) {
             }
         }
 
-        // Flash de notificação
+        // Flash de notificação: halo e arco sólido/gradiente.
         val f = flashLevel()
         if (f > 0f) {
-            extraPaint.reset()
-            extraPaint.isAntiAlias = true
-            extraPaint.style = Paint.Style.STROKE
-            extraPaint.strokeWidth = stroke + dp(2f)
-            extraPaint.color = flashColor
-            extraPaint.maskFilter = BlurMaskFilter(stroke * 1.4f + dp(4f), BlurMaskFilter.Blur.NORMAL)
-            extraPaint.alpha = (200 * f).toInt()
+            prepareAlertStroke(
+                extraPaint,
+                flashColor,
+                stroke * 1.4f + dp(4f),
+                (210 * f).toInt(),
+                stroke + dp(2f)
+            )
+            canvas.drawOval(oval, extraPaint)
+
+            prepareAlertStroke(
+                extraPaint,
+                flashColor,
+                null,
+                (255 * f).toInt(),
+                stroke
+            )
             canvas.drawOval(oval, extraPaint)
         }
     }

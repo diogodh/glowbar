@@ -65,21 +65,26 @@ class SettingsRepository(private val context: Context) {
 
     private fun g(name: String) = name + "_sw" + sw
 
+    private inline fun <reified T : Enum<T>> enumValue(key: String, default: T): T =
+        runCatching {
+            enumValueOf<T>(prefs.getString(key, default.name) ?: default.name)
+        }.getOrDefault(default)
+
     fun load(): GlowSettings = GlowSettings(
         enabled = prefs.getBoolean("enabled", false),
-        shape = Shape.valueOf(prefs.getString("shape", Shape.BAR.name)!!),
-        position = Position.valueOf(prefs.getString(g("position"), Position.TOP.name)!!),
-        widthDp = prefs.getInt(g("widthDp"), 120),
-        thicknessDp = prefs.getInt(g("thicknessDp"), 8),
-        offsetAlongDp = prefs.getInt(g("offsetAlongDp"), 0),
-        offsetFromEdgeDp = prefs.getInt(g("offsetFromEdgeDp"), 0),
-        strokeDp = prefs.getInt(g("strokeDp"), 4),
-        hScale = prefs.getFloat(g("hScale"), 1f),
-        vScale = prefs.getFloat(g("vScale"), 1f),
-        cutoutOffsetXDp = prefs.getInt(g("cutoutOffsetXDp"), 0),
-        cutoutOffsetYDp = prefs.getInt(g("cutoutOffsetYDp"), 0),
-        animMode = AnimMode.valueOf(prefs.getString("animMode", AnimMode.FLOW.name)!!),
-        animSpeed = AnimSpeed.valueOf(prefs.getString("animSpeed", AnimSpeed.MEDIUM.name)!!),
+        shape = enumValue("shape", Shape.BAR),
+        position = enumValue(g("position"), Position.TOP),
+        widthDp = prefs.getInt(g("widthDp"), 120).coerceIn(40, 400),
+        thicknessDp = prefs.getInt(g("thicknessDp"), 8).coerceIn(2, 24),
+        offsetAlongDp = prefs.getInt(g("offsetAlongDp"), 0).coerceIn(-1000, 1000),
+        offsetFromEdgeDp = prefs.getInt(g("offsetFromEdgeDp"), 0).coerceIn(-100, 1000),
+        strokeDp = prefs.getInt(g("strokeDp"), 4).coerceIn(2, 12),
+        hScale = prefs.getFloat(g("hScale"), 1f).coerceIn(0.5f, 2f),
+        vScale = prefs.getFloat(g("vScale"), 1f).coerceIn(0.5f, 2f),
+        cutoutOffsetXDp = prefs.getInt(g("cutoutOffsetXDp"), 0).coerceIn(-1000, 1000),
+        cutoutOffsetYDp = prefs.getInt(g("cutoutOffsetYDp"), 0).coerceIn(-1000, 1000),
+        animMode = enumValue("animMode", AnimMode.FLOW),
+        animSpeed = enumValue("animSpeed", AnimSpeed.MEDIUM),
         batteryIndicator = prefs.getBoolean("batteryIndicator", false),
         notificationGlow = prefs.getBoolean("notificationGlow", false),
         notificationProgress = prefs.getBoolean("notificationProgress", false),
@@ -87,9 +92,9 @@ class SettingsRepository(private val context: Context) {
         autoHideFullscreen = prefs.getBoolean("autoHideFullscreen", true),
         pendingUntilOpened = prefs.getBoolean("pendingUntilOpened", true),
         tapToOpen = prefs.getBoolean("tapToOpen", true),
-        pendingTimeoutMin = prefs.getInt("pendingTimeoutMin", 0),
+        pendingTimeoutMin = prefs.getInt("pendingTimeoutMin", 0).coerceIn(0, 120),
         idleDim = prefs.getBoolean("idleDim", false),
-        idleAlphaPct = prefs.getInt("idleAlphaPct", 15),
+        idleAlphaPct = prefs.getInt("idleAlphaPct", 15).coerceIn(0, 60),
         accessibilityMode = prefs.getBoolean("accessibilityMode", false)
     )
 

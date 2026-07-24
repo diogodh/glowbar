@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -41,6 +42,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -54,10 +56,13 @@ import pt.diogo.glowbar.overlay.GlowAccessibilityService
 import pt.diogo.glowbar.overlay.GlowOverlayService
 
 class MainActivity : ComponentActivity() {
+    private val resumeVersion = mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val repo = SettingsRepository(this)
         setContent {
+            val refreshKey = resumeVersion.intValue
             MaterialTheme(
                 colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
             ) {
@@ -66,11 +71,43 @@ class MainActivity : ComponentActivity() {
                     if (showPrivate) {
                         PrivateAppsScreen(onBack = { showPrivate = false })
                     } else {
-                        SettingsScreen(repo, onOpenPrivateApps = { showPrivate = true })
+                        SettingsScreen(
+                            repo = repo,
+                            refreshKey = refreshKey,
+                            onOpenPrivateApps = { showPrivate = true }
+                        )
                     }
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        reconcileRunningMode()
+        resumeVersion.intValue++
+    }
+
+    private fun reconcileRunningMode() {
+        val settings = SettingsRepository(this).load()
+        if (!settings.enabled) return
+
+        if (settings.accessibilityMode) {
+            stopService(Intent(this, GlowOverlayService::class.java))
+            GlowAccessibilityService.instance?.refresh()
+            return
+        }
+
+        // Se a permissão de acessibilidade continuar concedida de uma utilização
+        // anterior, garante que o overlay desse modo fica parado.
+        GlowAccessibilityService.instance?.refresh()
+        if (!Settings.canDrawOverlays(this)) return
+
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, GlowOverlayService::class.java)
+                .setAction(GlowOverlayService.ACTION_START)
+        )
     }
 }
 
@@ -88,57 +125,73 @@ private fun hasNotificationAccess(context: Context): Boolean =
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
+fun SettingsScreen(
+    repo: SettingsRepository,
+    refreshKey: Int,
+    onOpenPrivateApps: () -> Unit
+) {
     val context = LocalContext.current
     var s by remember { mutableStateOf(repo.load()) }
+
+    LaunchedEffect(refreshKey) {
+        s = repo.load()
+    }
 
     val notifPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { }
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= 33) {
-            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
-
     fun apply(new: GlowSettings) {
+        val wasEnabled = s.enabled
         s = new
         repo.save(new)
+
+        if (!new.enabled) {
+            GlowAccessibilityService.instance?.refresh()
+            context.stopService(Intent(context, GlowOverlayService::class.java))
+            return
+        }
 
         // Modo de acessibilidade: o overlay é gerido pelo próprio serviço,
         // sem foreground service nem permissão de sobreposição.
         if (new.accessibilityMode) {
+            context.stopService(Intent(context, GlowOverlayService::class.java))
             val svc = GlowAccessibilityService.instance
             if (svc == null) {
                 context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             } else {
                 svc.refresh()
             }
-            // Para o serviço clássico sem mexer na definição "enabled".
-            context.startService(
-                Intent(context, GlowOverlayService::class.java)
-                    .setAction(GlowOverlayService.ACTION_STOP_ONLY)
+            return
+        }
+
+        // Ao regressar ao modo clássico, para imediatamente qualquer overlay
+        // de acessibilidade que ainda esteja ativo.
+        GlowAccessibilityService.instance?.refresh()
+
+        if (!Settings.canDrawOverlays(context)) {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + context.packageName)
+                )
             )
             return
         }
 
-        val i = Intent(context, GlowOverlayService::class.java)
-        if (new.enabled) {
-            if (!Settings.canDrawOverlays(context)) {
-                context.startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:" + context.packageName)
-                    )
-                )
-                return
-            }
-            i.action = GlowOverlayService.ACTION_START
-            ContextCompat.startForegroundService(context, i)
-        } else {
-            i.action = GlowOverlayService.ACTION_TURN_OFF
-            context.startService(i)
+        if (!wasEnabled && Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+
+        ContextCompat.startForegroundService(
+            context,
+            Intent(context, GlowOverlayService::class.java)
+                .setAction(GlowOverlayService.ACTION_START)
+        )
     }
 
     Column(
@@ -350,9 +403,10 @@ fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
         ) { apply(s.copy(tapToOpen = it)) }
 
         Stepper(
-            if (s.pendingTimeoutMin == 0) "Expirar sozinho: nunca"
+            label = if (s.pendingTimeoutMin == 0) "Expirar sozinho: nunca"
             else "Expirar sozinho: " + s.pendingTimeoutMin + " min",
-            s.pendingTimeoutMin
+            value = s.pendingTimeoutMin,
+            unit = "min"
         ) { apply(s.copy(pendingTimeoutMin = it.coerceIn(0, 120))) }
 
         if (s.pendingUntilOpened && !s.accessibilityMode && !hasUsageAccess(context)) {
@@ -396,6 +450,8 @@ private fun StatusPanel(s: GlowSettings, context: Context) {
         s.notificationGlow || s.notificationProgress || privateCount > 0
     val hasNotif = hasNotificationAccess(context)
     val a11yOn = GlowAccessibilityService.instance != null
+    val missingOverlayPermission =
+        s.enabled && !s.accessibilityMode && !Settings.canDrawOverlays(context)
 
     val problems = mutableListOf<String>()
     if (needsNotifAccess && !hasNotif) {
@@ -403,6 +459,9 @@ private fun StatusPanel(s: GlowSettings, context: Context) {
     }
     if (s.accessibilityMode && !a11yOn) {
         problems.add("O modo sem notificações está ligado, mas a Glowbar ainda não foi ativada nas definições de acessibilidade.")
+    }
+    if (missingOverlayPermission) {
+        problems.add("Falta a permissão para mostrar a Glowbar por cima das outras aplicações.")
     }
     if (!s.enabled) {
         problems.add("A Glowbar está desligada no interruptor acima.")
@@ -439,6 +498,20 @@ private fun StatusPanel(s: GlowSettings, context: Context) {
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Abrir definições de acessibilidade") }
             }
+            if (missingOverlayPermission) {
+                Spacer(Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:" + context.packageName)
+                            )
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Conceder permissão de sobreposição") }
+            }
         }
     }
 }
@@ -469,7 +542,12 @@ private fun <T> ChipRow(
 }
 
 @Composable
-private fun Stepper(label: String, value: Int, onChange: (Int) -> Unit) {
+private fun Stepper(
+    label: String,
+    value: Int,
+    unit: String = "dp",
+    onChange: (Int) -> Unit
+) {
     Spacer(Modifier.height(12.dp))
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -478,7 +556,7 @@ private fun Stepper(label: String, value: Int, onChange: (Int) -> Unit) {
         Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
         OutlinedButton(onClick = { onChange(value - 2) }) { Text("−") }
         Text(
-            value.toString() + "dp",
+            value.toString() + unit,
             Modifier.padding(horizontal = 10.dp),
             style = MaterialTheme.typography.bodyMedium
         )
