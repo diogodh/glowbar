@@ -49,6 +49,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import pt.diogo.glowbar.overlay.GlowAccessibilityService
 import pt.diogo.glowbar.overlay.GlowOverlayService
 
 class MainActivity : ComponentActivity() {
@@ -102,6 +103,23 @@ fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
     fun apply(new: GlowSettings) {
         s = new
         repo.save(new)
+
+        // Modo de acessibilidade: o overlay é gerido pelo próprio serviço,
+        // sem foreground service nem permissão de sobreposição.
+        if (new.accessibilityMode) {
+            val svc = GlowAccessibilityService.instance
+            if (svc == null) {
+                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            } else {
+                svc.refresh()
+            }
+            context.startService(
+                Intent(context, GlowOverlayService::class.java)
+                    .setAction(GlowOverlayService.ACTION_TURN_OFF)
+            )
+            return
+        }
+
         val i = Intent(context, GlowOverlayService::class.java)
         if (new.enabled) {
             if (!Settings.canDrawOverlays(context)) {
@@ -272,6 +290,47 @@ fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
             s.autoHideFullscreen
         ) { apply(s.copy(autoHideFullscreen = it)) }
 
+        Section("Aparência em repouso")
+        ToggleRow(
+            "Apagar quando não há avisos",
+            "A barra fica cinzenta e quase transparente; só ganha cor e brilho " +
+                "quando chega notificação de uma app escolhida",
+            s.idleDim
+        ) { apply(s.copy(idleDim = it)) }
+
+        if (s.idleDim) {
+            Section("Intensidade em repouso: " + s.idleAlphaPct + "%")
+            Slider(
+                value = s.idleAlphaPct.toFloat(),
+                onValueChange = { s = s.copy(idleAlphaPct = it.toInt()) },
+                onValueChangeFinished = { apply(s) },
+                valueRange = 0f..60f
+            )
+        }
+
+        Section("Notificações da própria Glowbar")
+        ToggleRow(
+            "Modo sem notificações",
+            "Usa um serviço de acessibilidade em vez da permissão de " +
+                "sobreposição: desaparecem o aviso do sistema e a notificação " +
+                "permanente. Também dispensa o acesso ao histórico de utilização",
+            s.accessibilityMode
+        ) { apply(s.copy(accessibilityMode = it)) }
+
+        if (s.accessibilityMode) {
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = {
+                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Abrir definições de acessibilidade") }
+            Text(
+                "Ativa lá a Glowbar. Sem isso, a barra não aparece neste modo.",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
         Section("Avisos das apps privadas")
         ToggleRow(
             "Manter aviso até abrir a app",
@@ -292,7 +351,7 @@ fun SettingsScreen(repo: SettingsRepository, onOpenPrivateApps: () -> Unit) {
             s.pendingTimeoutMin
         ) { apply(s.copy(pendingTimeoutMin = it.coerceIn(0, 120))) }
 
-        if (s.pendingUntilOpened && !hasUsageAccess(context)) {
+        if (s.pendingUntilOpened && !s.accessibilityMode && !hasUsageAccess(context)) {
             Spacer(Modifier.height(12.dp))
             OutlinedButton(
                 onClick = {

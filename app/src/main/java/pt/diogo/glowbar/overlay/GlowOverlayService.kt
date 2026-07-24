@@ -4,44 +4,26 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.app.AppOpsManager
 import android.app.Service
-import android.app.usage.UsageEvents
-import android.app.usage.UsageStatsManager
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
-import android.graphics.PixelFormat
-import android.graphics.RectF
 import android.graphics.drawable.Icon
-import android.os.BatteryManager
 import android.os.Build
-import android.os.Handler
-import android.os.Process
 import android.os.IBinder
-import android.os.Looper
-import android.provider.Settings
-import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
-import android.view.WindowInsets
 import android.view.WindowManager
-import pt.diogo.glowbar.GlowSettings
 import pt.diogo.glowbar.MainActivity
-import pt.diogo.glowbar.Position
 import pt.diogo.glowbar.R
 import pt.diogo.glowbar.SettingsRepository
-import pt.diogo.glowbar.Shape
 
+/**
+ * Modo clássico: foreground service + TYPE_APPLICATION_OVERLAY.
+ * Tem sempre duas notificações associadas — a deste serviço e o aviso do
+ * sistema sobre sobreposição. Para as eliminar, usa o modo de acessibilidade.
+ */
 class GlowOverlayService : Service() {
 
     companion object {
-        @Volatile
-        var instance: GlowOverlayService? = null
-
         const val ACTION_START = "pt.diogo.glowbar.START"
         const val ACTION_REFRESH = "pt.diogo.glowbar.REFRESH"
         const val ACTION_HIDE = "pt.diogo.glowbar.HIDE"
@@ -52,63 +34,30 @@ class GlowOverlayService : Service() {
         const val NOTIF_ID = 1
     }
 
-    private lateinit var wm: WindowManager
-    private lateinit var repo: SettingsRepository
-    private val mainHandler = Handler(Looper.getMainLooper())
-
-    private var glowView: GlowView? = null
-    private var settings: GlowSettings? = null
-
-    // Máquina de estados de visibilidade
-    private var hiddenTemp = false
-    private var hiddenFullscreen = false
-
-    // Progresso por notificação (a mais recente ganha)
-    private val progressMap = LinkedHashMap<String, Float>()
-
-    // Avisos por resolver: pacote -> cor do segmento
-    private val pending = LinkedHashMap<String, Int>()
-    private var pollScheduled = false
-
-    private val batteryReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) {
-            val level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            val scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
-            val status = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-            glowView?.batteryLevel = if (level >= 0 && scale > 0) level.toFloat() / scale else 1f
-            glowView?.charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
-                    status == BatteryManager.BATTERY_STATUS_FULL
-        }
-    }
+    private var controller: GlowController? = null
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        repo = SettingsRepository(this)
-        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        controller = GlowController(
+            context = this,
+            windowType = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            onStopRequested = { stopSelf() }
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val c = controller ?: return START_NOT_STICKY
         when (intent?.action) {
-            ACTION_HIDE -> {
-                hiddenTemp = true
-                updateVisibility()
-                startFg()
-            }
-            ACTION_SHOW -> {
-                hiddenTemp = false
-                updateVisibility()
-                startFg()
-            }
+            ACTION_HIDE -> { c.hideTemporarily(true); startFg() }
+            ACTION_SHOW -> { c.hideTemporarily(false); startFg() }
             ACTION_TURN_OFF -> {
-                repo.setEnabled(false)
+                SettingsRepository(this).setEnabled(false)
                 stopSelf()
                 return START_NOT_STICKY
             }
-            else -> { // ACTION_START / ACTION_REFRESH / restart do sistema
+            else -> {
                 startFg()
-                rebuildOverlay()
+                if (GlowController.active !== c) c.start() else c.rebuild()
             }
         }
         return START_STICKY
@@ -116,257 +65,16 @@ class GlowOverlayService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Rotação ou foldable aberto/fechado: recarrega as definições desse ecrã
-        rebuildOverlay()
+        controller?.rebuild()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        mainHandler.removeCallbacksAndMessages(null)
-        glowView?.let { runCatching { wm.removeView(it) } }
-        glowView = null
-        runCatching { unregisterReceiver(batteryReceiver) }
-        instance = null
+        controller?.stop()
+        controller = null
         super.onDestroy()
     }
-
-    // ------------------------------------------------------------- overlay
-
-    private fun rebuildOverlay() {
-        val s = repo.load()
-        settings = s
-
-        if (!s.enabled || !Settings.canDrawOverlays(this)) {
-            stopSelf()
-            return
-        }
-
-        glowView?.let { runCatching { wm.removeView(it) } }
-
-        val v = GlowView(this)
-        v.applySettings(s)
-        glowView = v
-
-        v.setOnApplyWindowInsetsListener { _, insets ->
-            if (Build.VERSION.SDK_INT >= 28) {
-                val r = insets.displayCutout?.boundingRects?.firstOrNull()
-                v.cutoutRect = r?.let { RectF(it) }
-            }
-            if (Build.VERSION.SDK_INT >= 30) {
-                val fullscreen = !insets.isVisible(WindowInsets.Type.statusBars())
-                val hide = fullscreen && (settings?.autoHideFullscreen == true)
-                if (hide != hiddenFullscreen) {
-                    hiddenFullscreen = hide
-                    updateVisibility()
-                }
-            }
-            insets
-        }
-
-        v.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_UP && pending.isNotEmpty()) {
-                openMostRecentPending()
-            }
-            true
-        }
-
-        wm.addView(v, buildParams(s))
-        pushPending()
-        updateVisibility()
-
-        // Estado inicial da bateria (broadcast sticky)
-        registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))?.let {
-            batteryReceiver.onReceive(this, it)
-        }
-    }
-
-    private fun dpToPx(v: Int) = (v * resources.displayMetrics.density).toInt()
-
-    private fun buildParams(s: GlowSettings): WindowManager.LayoutParams {
-        val type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        val pad = dpToPx(GlowView.PAD_DP)
-
-        val lp: WindowManager.LayoutParams
-        if (s.shape == Shape.BAR) {
-            val len = dpToPx(s.widthDp) + pad * 2
-            val cross = (dpToPx(s.thicknessDp) * 2.5f).toInt() + pad * 2
-            val horizontal = s.position == Position.TOP || s.position == Position.BOTTOM
-            lp = WindowManager.LayoutParams(
-                if (horizontal) len else cross,
-                if (horizontal) cross else len,
-                type, flags, PixelFormat.TRANSLUCENT
-            )
-            lp.gravity = when (s.position) {
-                Position.TOP -> Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                Position.BOTTOM -> Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                Position.LEFT -> Gravity.LEFT or Gravity.CENTER_VERTICAL
-                Position.RIGHT -> Gravity.RIGHT or Gravity.CENTER_VERTICAL
-            }
-            if (horizontal) {
-                lp.x = dpToPx(s.offsetAlongDp)
-                lp.y = dpToPx(s.offsetFromEdgeDp) - pad
-            } else {
-                lp.y = dpToPx(s.offsetAlongDp)
-                lp.x = dpToPx(s.offsetFromEdgeDp) - pad
-            }
-        } else {
-            // Cutout: janela a toda a largura no topo, para receber a posição do punch-hole
-            lp = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                dpToPx(240),
-                type, flags, PixelFormat.TRANSLUCENT
-            )
-            lp.gravity = Gravity.TOP
-        }
-
-        if (Build.VERSION.SDK_INT >= 28) {
-            lp.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
-        return lp
-    }
-
-    private fun updateVisibility() {
-        glowView?.visibility =
-            if (hiddenTemp || hiddenFullscreen) View.GONE else View.VISIBLE
-    }
-
-    // ------------------------------------------------- eventos de notificações
-
-    fun onNotificationEvent(key: String, progress: Float?) {
-        mainHandler.post {
-            val s = settings ?: return@post
-            if (progress != null) {
-                if (!s.notificationProgress) return@post
-                if (progress >= 1f) progressMap.remove(key) else progressMap[key] = progress
-                glowView?.progress = progressMap.values.lastOrNull()
-            } else {
-                if (!s.notificationGlow) return@post
-                glowView?.flash()
-            }
-        }
-    }
-
-    /**
-     * Notificação de uma app privada: só o sinal luminoso.
-     * Se "pendingUntilOpened" estiver ativo, o aviso fica a respirar na barra
-     * até abrires a app (ou tocares na barra); caso contrário é só um flash.
-     */
-    fun onPrivateNotification(color: Int?, pkg: String) {
-        mainHandler.post {
-            val s = settings ?: return@post
-            glowView?.flash(color)
-            if (!s.pendingUntilOpened) return@post
-
-            pending[pkg] = color ?: 0xFFFFFFFF.toInt()
-            pushPending()
-            startPolling()
-
-            if (s.pendingTimeoutMin > 0) {
-                mainHandler.postDelayed(
-                    { clearPending(pkg) },
-                    s.pendingTimeoutMin * 60_000L
-                )
-            }
-        }
-    }
-
-    private fun pushPending() {
-        glowView?.pendingColors = pending.values.toList()
-        updateTouchable()
-    }
-
-    fun clearPending(pkg: String) {
-        mainHandler.post {
-            if (pending.remove(pkg) != null) pushPending()
-        }
-    }
-
-    // ------------------------------------------- deteção da app em 1.º plano
-
-    private fun hasUsageAccess(): Boolean {
-        val ops = getSystemService(AppOpsManager::class.java) ?: return false
-        val mode = ops.unsafeCheckOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName
-        )
-        return mode == AppOpsManager.MODE_ALLOWED
-    }
-
-    @Suppress("DEPRECATION")
-    private fun foregroundPackage(): String? {
-        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
-        val now = System.currentTimeMillis()
-        val events = usm.queryEvents(now - 10_000L, now)
-        val ev = UsageEvents.Event()
-        var last: String? = null
-        while (events.hasNextEvent()) {
-            events.getNextEvent(ev)
-            if (ev.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) last = ev.packageName
-        }
-        return last
-    }
-
-    private val pollRunnable = object : Runnable {
-        override fun run() {
-            pollScheduled = false
-            if (pending.isEmpty()) return
-            if (hasUsageAccess()) {
-                foregroundPackage()?.let { fg ->
-                    if (pending.remove(fg) != null) pushPending()
-                }
-            }
-            if (pending.isNotEmpty()) startPolling()
-        }
-    }
-
-    private fun startPolling() {
-        if (pollScheduled || pending.isEmpty()) return
-        pollScheduled = true
-        mainHandler.postDelayed(pollRunnable, 1500L)
-    }
-
-    // ------------------------------------------------ toque para abrir a app
-
-    private fun updateTouchable() {
-        val v = glowView ?: return
-        val s = settings ?: return
-        val wantTouch = s.tapToOpen && pending.isNotEmpty()
-        val lp = (v.layoutParams as? WindowManager.LayoutParams) ?: return
-        val isTouchable = (lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
-        if (wantTouch == isTouchable) return
-
-        lp.flags = if (wantTouch) {
-            lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        } else {
-            lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        }
-        runCatching { wm.updateViewLayout(v, lp) }
-    }
-
-    private fun openMostRecentPending() {
-        val pkg = pending.keys.lastOrNull() ?: return
-        val launch = packageManager.getLaunchIntentForPackage(pkg)
-        if (launch != null) {
-            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            runCatching { startActivity(launch) }
-        }
-        pending.remove(pkg)
-        pushPending()
-    }
-
-    fun onNotificationGone(key: String) {
-        mainHandler.post {
-            progressMap.remove(key)
-            glowView?.progress = progressMap.values.lastOrNull()
-        }
-    }
-
-    // ------------------------------------------------------- notificação FG
 
     private fun startFg() {
         val nm = getSystemService(NotificationManager::class.java)
@@ -387,7 +95,8 @@ class GlowOverlayService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val toggleAction = if (hiddenTemp)
+        val hidden = controller?.isHiddenTemporarily() == true
+        val toggleAction = if (hidden)
             Notification.Action.Builder(null as Icon?, "Mostrar", servicePi(ACTION_SHOW, 1)).build()
         else
             Notification.Action.Builder(null as Icon?, "Esconder", servicePi(ACTION_HIDE, 1)).build()
@@ -399,7 +108,7 @@ class GlowOverlayService : Service() {
             .setSmallIcon(R.drawable.ic_glow_notification)
             .setContentTitle("Glowbar ativa")
             .setContentText(
-                if (hiddenTemp) "Temporariamente escondida"
+                if (hidden) "Temporariamente escondida"
                 else "A brilhar por cima das tuas aplicações"
             )
             .setOngoing(true)

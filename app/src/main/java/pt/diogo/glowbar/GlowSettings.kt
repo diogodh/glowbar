@@ -40,7 +40,14 @@ data class GlowSettings(
     // Avisos persistentes das apps privadas
     val pendingUntilOpened: Boolean = true,
     val tapToOpen: Boolean = true,
-    val pendingTimeoutMin: Int = 0   // 0 = nunca expira
+    val pendingTimeoutMin: Int = 0,  // 0 = nunca expira
+
+    // Aparência em repouso
+    val idleDim: Boolean = false,
+    val idleAlphaPct: Int = 15,      // 0-100
+
+    // Modo sem notificações (serviço de acessibilidade)
+    val accessibilityMode: Boolean = false
 )
 
 /**
@@ -80,7 +87,10 @@ class SettingsRepository(private val context: Context) {
         autoHideFullscreen = prefs.getBoolean("autoHideFullscreen", true),
         pendingUntilOpened = prefs.getBoolean("pendingUntilOpened", true),
         tapToOpen = prefs.getBoolean("tapToOpen", true),
-        pendingTimeoutMin = prefs.getInt("pendingTimeoutMin", 0)
+        pendingTimeoutMin = prefs.getInt("pendingTimeoutMin", 0),
+        idleDim = prefs.getBoolean("idleDim", false),
+        idleAlphaPct = prefs.getInt("idleAlphaPct", 15),
+        accessibilityMode = prefs.getBoolean("accessibilityMode", false)
     )
 
     fun save(s: GlowSettings) {
@@ -107,6 +117,9 @@ class SettingsRepository(private val context: Context) {
             putBoolean("pendingUntilOpened", s.pendingUntilOpened)
             putBoolean("tapToOpen", s.tapToOpen)
             putInt("pendingTimeoutMin", s.pendingTimeoutMin)
+            putBoolean("idleDim", s.idleDim)
+            putInt("idleAlphaPct", s.idleAlphaPct)
+            putBoolean("accessibilityMode", s.accessibilityMode)
         }.apply()
     }
 

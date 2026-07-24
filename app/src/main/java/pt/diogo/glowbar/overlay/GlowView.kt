@@ -120,6 +120,13 @@ class GlowView(context: Context) : View(context) {
 
     private fun wave() = (sin(phase * 2.0 * PI).toFloat() + 1f) / 2f
 
+    /** Em repouso (sem pendências nem progresso) a barra pode ficar quase apagada. */
+    private fun idleDimmed(): Boolean =
+        settings.idleDim && pendingColors.isEmpty() && progress == null
+
+    private fun idleAlpha(): Int =
+        (255 * (settings.idleAlphaPct.coerceIn(0, 100) / 100f)).toInt()
+
     /** Respiração desfasada, para os segmentos não pulsarem todos em uníssono. */
     private fun waveAt(offset: Float) =
         (sin((phase + offset) * 2.0 * PI).toFloat() + 1f) / 2f
@@ -247,6 +254,14 @@ class GlowView(context: Context) : View(context) {
             canvas.drawRoundRect(filled, radius, radius, glowPaint)
             preparePaint(paint, null, 255)
             canvas.drawRoundRect(filled, radius, radius, paint)
+        } else if (idleDimmed()) {
+            // ------------------- repouso apagado -------------------
+            // Sem halo: cinzento discreto, quase transparente.
+            extraPaint.reset()
+            extraPaint.isAntiAlias = true
+            extraPaint.color = 0xFFBDBDBD.toInt()
+            extraPaint.alpha = (idleAlpha() * (alpha / 255f)).toInt()
+            canvas.drawRoundRect(rect, radius, radius, extraPaint)
         } else {
             // ------------------- modo normal / bateria -------------------
             preparePaint(glowPaint, thick * 1.4f, alpha / 2)
@@ -382,6 +397,14 @@ class GlowView(context: Context) : View(context) {
             canvas.drawArc(oval, -90f, 360f * p.coerceIn(0f, 1f), false, glowPaint)
             prepareStroke(paint, null, 255, stroke)
             canvas.drawArc(oval, -90f, 360f * p.coerceIn(0f, 1f), false, paint)
+        } else if (idleDimmed()) {
+            extraPaint.reset()
+            extraPaint.isAntiAlias = true
+            extraPaint.style = Paint.Style.STROKE
+            extraPaint.strokeWidth = stroke
+            extraPaint.color = 0xFFBDBDBD.toInt()
+            extraPaint.alpha = (idleAlpha() * (alpha / 255f)).toInt()
+            canvas.drawOval(oval, extraPaint)
         } else {
             prepareStroke(glowPaint, stroke * 1.6f, alpha / 2, stroke)
             canvas.drawOval(oval, glowPaint)

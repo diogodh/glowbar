@@ -78,6 +78,34 @@ Limites honestos desta funcionalidade:
   guarda apenas o nome do pacote e a hora, para saberes que app te procurou;
   o conteúdo nunca é lido nem guardado.
 
+## Modo sem notificações (acessibilidade)
+
+A notificação "está a sobrepor-se a outras apps" é gerada pelo **Android**, não
+pela app: aparece sempre que existe um overlay via permissão SYSTEM_ALERT_WINDOW,
+e nenhuma app a consegue apagar por código.
+
+Alternativa implementada: um `AccessibilityService` pode criar janelas
+`TYPE_ACCESSIBILITY_OVERLAY` **sem** essa permissão, e não precisa de foreground
+service. Resultado: zero notificações. Ativa em **Notificações da própria
+Glowbar → Modo sem notificações**, e depois liga a Glowbar nas definições de
+acessibilidade do Android.
+
+Neste modo também deixa de ser necessário o acesso ao histórico de utilização,
+porque o próprio serviço reporta a app em primeiro plano.
+
+Contrapartida honesta: a permissão de acessibilidade é poderosa (permitiria ler
+o ecrã). Esta app declara `canRetrieveWindowContent="false"` e só usa o evento
+de mudança de janela para saber o nome do pacote em primeiro plano — o código
+está todo aqui para verificares. Ainda assim, é uma permissão que só faz sentido
+conceder a software que controlas.
+
+## Aparência em repouso
+
+Em **Aparência em repouso → Apagar quando não há avisos**, a barra fica cinzenta
+e quase transparente (intensidade configurável, 0–60%) enquanto não há nada
+pendente, e só ganha cor e halo quando chega notificação de uma app escolhida.
+Nota: com este modo ligado, o indicador de bateria não colore a barra em repouso.
+
 ## Limitações conhecidas (v1)
 
 - **Autohide em fullscreen** usa a visibilidade da status bar via WindowInsets
