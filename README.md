@@ -1,4 +1,4 @@
-# Glowbar 1.1.0 (clone pessoal)
+# Glowbar 1.2.0 (clone pessoal)
 
 Overlay luminoso persistente para Android — barra numa margem do ecrã ou anel
 em redor da câmara frontal — com animações Flow/Pulse/Breathe, indicador de
@@ -6,15 +6,29 @@ bateria, notification glow, notification progress, autostart após reboot,
 autohide em fullscreen e definições separadas por ecrã (foldables).
 Tudo desbloqueado, sem versão Premium.
 
-## Compilar no Windows
+## Compilar com GitHub Actions
 
-1. Instala o **Android Studio** (https://developer.android.com/studio) — inclui o JDK e o SDK.
-2. **File → Open** e escolhe esta pasta `Glowbar`. Aceita a sincronização do Gradle
-   (o Android Studio descarrega o Gradle 8.7 e as dependências automaticamente).
-3. Liga o telemóvel por USB com a **depuração USB** ativa
-   (Definições → Opções de programador) e carrega em **Run ▶**.
-4. Alternativa sem cabo: **Build → Build APK(s)** e instala o APK gerado em
-   `app/build/outputs/apk/debug/`.
+1. Cria um repositório no GitHub e envia o conteúdo desta pasta `Glowbar`.
+2. Abre **Actions → Build Glowbar APK → Run workflow**.
+3. Quando terminar, abre a execução e descarrega o artefacto
+   **Glowbar-1.2.0-debug**.
+4. Dentro do artefacto está `app-debug.apk`, pronto para instalar.
+
+O workflow instala JDK 17, Android SDK 35 e Gradle 8.7, executa `lintDebug`,
+`testDebugUnitTest` e `assembleDebug`, e só publica o APK se todas as etapas
+terminarem sem erro.
+
+## Compilar localmente
+
+O projeto usa Gradle 8.7 e JDK 17. Como o ZIP não inclui o binário do Gradle,
+instala Gradle 8.7 localmente ou abre o projeto no Android Studio e seleciona
+essa versão em **Gradle settings**. Depois executa:
+
+```bash
+gradle clean lintDebug testDebugUnitTest assembleDebug
+```
+
+O APK fica em `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Permissões a conceder no telefone
 
@@ -120,6 +134,30 @@ duas dimensões — a 1.00x/1.00x o resultado é sempre um círculo perfeito.
 manualmente formas realmente ovais (câmaras "pill") ou fazeres correções
 finas.
 
+## Acordar o ecrã e duração do aviso
+
+**Duração do aviso** define quanto tempo o sinal fica na barra: *Até abrir*
+(fica até abrires a app ou tocares na barra), ou 5s / 10s / 30s / 1min / 5min /
+30min. Definições antigas guardadas em minutos são convertidas automaticamente.
+
+A contagem só corre com o **ecrã ligado**: com o telefone pousado o aviso fica
+em pausa e só começa a expirar quando pegas no telefone. Sem isto, uma duração
+curta faria desaparecer a notificação sem nunca a teres visto.
+
+**Acordar o ecrã** liga o ecrã durante alguns segundos (2–30, configurável)
+quando chega aviso de uma app privada, para veres o glow com o telefone
+pousado. Usa um wake lock com timeout, que se liberta sozinho.
+
+Limites honestos:
+
+- Se o overlay aparece **por cima do ecrã de bloqueio** depende do fabricante.
+  Nalguns modelos aparece; noutros o keyguard tapa-o e só verás o glow depois de
+  desbloqueares. Não há forma de o garantir a partir da app — testa no teu.
+- **Não é possível** desenhar no Always-On Display: essa camada é controlada
+  pelo fabricante e não está acessível a apps de terceiros.
+- Acordar o ecrã com frequência **gasta bateria**. Se receberes muitas
+  notificações privadas, considera um tempo curto (2–5s).
+
 ## Se as apps privadas não fizerem nada
 
 O **acesso às notificações é obrigatório** para esta funcionalidade — sem ele o
@@ -130,6 +168,29 @@ O painel "Estado" no ecrã principal avisa quando falta.
 Nota: depois de **reinstalar o APK**, o Android por vezes desliga o acesso às
 notificações. Se deixar de funcionar após uma atualização, desliga e volta a
 ligar a Glowbar em Definições → Notificações → Acesso a notificações.
+
+## Consumo de recursos
+
+A app fica sempre em memória, por isso o desenho foi optimizado para o processo
+estar **ocioso** na maior parte do tempo:
+
+- **O animador só corre quando há mesmo movimento.** Antes desenhava 60x por
+  segundo permanentemente. Agora pára quando: o ecrã está apagado, a barra está
+  escondida (fullscreen/Esconder), o modo é *Nenhuma* sem avisos pendentes, ou
+  está em repouso apagado sem Pulse/Breathe. Em modo estático desenha uma vez e
+  fica quieto.
+- **Gradientes em cache.** Eram recriados a cada frame; agora só se refazem
+  quando a geometria muda, o que reduz muito o trabalho do garbage collector.
+- **Camada de software só quando é precisa.** O halo (`BlurMaskFilter`) obriga a
+  render por software, bem mais caro. Em repouso apagado não há halo, por isso
+  usa-se aceleração por hardware.
+- **Sondagem da app em primeiro plano** só acontece enquanto há avisos
+  pendentes, e nunca no modo de acessibilidade (aí o sistema avisa diretamente).
+
+Memória: a Activity de definições é destruída ao fechar; o que fica residente é
+apenas o serviço e uma View pequena. Se quiseres reduzir ainda mais o consumo,
+o modo *Nenhuma* com *Apagar quando não há avisos* é a combinação mais barata —
+nesse estado a app praticamente não usa CPU até chegar uma notificação.
 
 ## Limitações conhecidas (v1)
 

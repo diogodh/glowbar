@@ -20,6 +20,7 @@ import pt.diogo.glowbar.Position
 import pt.diogo.glowbar.SettingsRepository
 import pt.diogo.glowbar.Shape
 import kotlin.math.PI
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
@@ -41,13 +42,23 @@ class GlowView(context: Context) : View(context) {
     var charging: Boolean = false
         set(v) { field = v; invalidate() }
     var progress: Float? = null
-        set(v) { field = v; invalidate() }
+        set(v) {
+            field = v
+            updateLayerType()
+            syncAnimator()
+            invalidate()
+        }
     var cutoutRect: RectF? = null
         set(v) { field = v; invalidate() }
 
     /** Cores das apps com aviso por resolver. Vazio = sem pendências. */
     var pendingColors: List<Int?> = emptyList()
-        set(v) { field = v; invalidate() }
+        set(v) {
+            field = v
+            updateLayerType()
+            syncAnimator()
+            invalidate()
+        }
 
     private var flashStart = 0L
     private var flashColor: Int? = null
@@ -58,6 +69,58 @@ class GlowView(context: Context) : View(context) {
     private val extraPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val shaderMatrix = Matrix()
 
+    // BlurMaskFilter era criado repetidamente durante cada frame. A cache usa
+    // passos de 0,5 px e é limitada para não crescer com a animação Breathe.
+    private val blurCache = object : LinkedHashMap<Int, BlurMaskFilter>(32, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<Int, BlurMaskFilter>
+        ): Boolean = size > 32
+    }
+
+    private fun blurMask(radius: Float): BlurMaskFilter {
+        val key = (radius.coerceAtLeast(0.5f) * 2f).roundToInt()
+        return blurCache.getOrPut(key) {
+            BlurMaskFilter(key / 2f, BlurMaskFilter.Blur.NORMAL)
+        }
+    }
+
+    // Os gradientes eram recriados a cada frame (60x/s no modo Flow). Como só
+    // dependem da geometria, ficam em cache e só se refazem quando ela muda.
+    private var barGradient: LinearGradient? = null
+    private var barGradientLen = -1f
+    private var barGradientHorizontal = false
+
+    private var ringGradient: SweepGradient? = null
+    private var ringGradientCx = Float.NaN
+    private var ringGradientCy = Float.NaN
+
+    private fun barGradient(len: Float, horizontal: Boolean): LinearGradient {
+        val cached = barGradient
+        if (cached != null && barGradientLen == len && barGradientHorizontal == horizontal) {
+            return cached
+        }
+        val created = LinearGradient(
+            0f, 0f,
+            if (horizontal) len else 0f,
+            if (horizontal) 0f else len,
+            COLORS, null, Shader.TileMode.REPEAT
+        )
+        barGradient = created
+        barGradientLen = len
+        barGradientHorizontal = horizontal
+        return created
+    }
+
+    private fun ringGradient(cx: Float, cy: Float): SweepGradient {
+        val cached = ringGradient
+        if (cached != null && ringGradientCx == cx && ringGradientCy == cy) return cached
+        val created = SweepGradient(cx, cy, COLORS, null)
+        ringGradient = created
+        ringGradientCx = cx
+        ringGradientCy = cy
+        return created
+    }
+
     private val animator = ValueAnimator.ofFloat(0f, 1f).apply {
         repeatCount = ValueAnimator.INFINITE
         interpolator = LinearInterpolator()
@@ -66,6 +129,47 @@ class GlowView(context: Context) : View(context) {
             phase = it.animatedValue as Float
             invalidate()
         }
+    }
+
+    /** Falso quando o dono do overlay sabe que nada está visível (ecrã apagado). */
+    private var screenOn = true
+
+    /**
+     * O animador é a única coisa nesta app que consome CPU continuamente.
+     * Só deve correr quando há mesmo movimento para desenhar: modo animado,
+     * flash a decorrer, ou avisos pendentes (que respiram). Em modo estático
+     * sem pendências, um único desenho chega — e o processo fica ocioso.
+     */
+    private fun needsAnimation(): Boolean {
+        if (!screenOn) return false
+        if (visibility != VISIBLE) return false
+        if (flashLevel() > 0f) return true
+        if (pendingColors.isNotEmpty()) return true
+        // Em repouso apagado a barra é cinzenta e imóvel: só Pulse (alpha) e
+        // Breathe (espessura) continuam a produzir movimento visível.
+        if (idleDimmed()) {
+            return settings.animMode == AnimMode.PULSE ||
+                settings.animMode == AnimMode.BREATHE
+        }
+        return settings.animMode != AnimMode.NONE
+    }
+
+    private fun syncAnimator() {
+        val shouldRun = needsAnimation()
+        if (shouldRun && !animator.isStarted) {
+            animator.start()
+        } else if (!shouldRun && animator.isStarted) {
+            animator.cancel()
+            phase = 0f
+            invalidate()
+        }
+    }
+
+    /** Chamado pelo controlador quando o ecrã liga/desliga. */
+    fun setScreenOn(on: Boolean) {
+        if (screenOn == on) return
+        screenOn = on
+        syncAnimator()
     }
 
     companion object {
@@ -84,8 +188,19 @@ class GlowView(context: Context) : View(context) {
     }
 
     init {
-        // Necessário para o BlurMaskFilter funcionar
-        setLayerType(LAYER_TYPE_SOFTWARE, null)
+        updateLayerType()
+    }
+
+    /**
+     * O BlurMaskFilter (halo) exige camada de software, que é bastante mais
+     * cara do que a aceleração por hardware. Em repouso apagado não há halo
+     * nenhum, por isso nesse caso usa-se hardware.
+     */
+    private fun updateLayerType() {
+        val needsSoftware = !(settings.idleDim && settings.idleAlphaPct <= 60 &&
+            pendingColors.isEmpty() && progress == null && flashLevel() <= 0f)
+        val wanted = if (needsSoftware) LAYER_TYPE_SOFTWARE else LAYER_TYPE_HARDWARE
+        if (layerType != wanted) setLayerType(wanted, null)
     }
 
     fun applySettings(s: GlowSettings) {
@@ -95,6 +210,8 @@ class GlowView(context: Context) : View(context) {
             AnimSpeed.MEDIUM -> 4000L
             AnimSpeed.FAST -> 2000L
         }
+        updateLayerType()
+        syncAnimator()
         invalidate()
     }
 
@@ -102,17 +219,25 @@ class GlowView(context: Context) : View(context) {
     fun flash(color: Int? = null) {
         flashColor = color
         flashStart = SystemClock.uptimeMillis()
+        updateLayerType()
+        syncAnimator()
         postInvalidateOnAnimation()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        animator.start()
+        syncAnimator()
     }
 
     override fun onDetachedFromWindow() {
         animator.cancel()
         super.onDetachedFromWindow()
+    }
+
+    /** Escondida (fullscreen ou "Esconder") não precisa de gastar CPU. */
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        syncAnimator()
     }
 
     private fun dp(v: Int) = v * resources.displayMetrics.density
@@ -139,6 +264,15 @@ class GlowView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         if (settings.shape == Shape.BAR) drawBar(canvas) else drawRing(canvas)
+
+        // O flash termina sozinho passados FLASH_MS. Quando isso acontece e
+        // nada mais precisa de animação, o animador para e o processo fica
+        // ocioso em vez de continuar a redesenhar 60 vezes por segundo.
+        if (flashStart != 0L && flashLevel() <= 0f) {
+            flashStart = 0L
+            updateLayerType()
+            syncAnimator()
+        }
     }
 
     // ------------------------------------------------------------------ BARRA
@@ -180,12 +314,7 @@ class GlowView(context: Context) : View(context) {
             batteryMode && charging -> solidColor = GREEN
             batteryMode && batteryLevel <= 0.15f -> solidColor = RED
             else -> {
-                val g = LinearGradient(
-                    0f, 0f,
-                    if (horizontal) len else 0f,
-                    if (horizontal) 0f else len,
-                    COLORS, null, Shader.TileMode.REPEAT
-                )
+                val g = barGradient(len, horizontal)
                 val shift = if (s.animMode == AnimMode.FLOW) phase * len else 0f
                 shaderMatrix.reset()
                 if (horizontal) shaderMatrix.setTranslate(rect.left + shift, 0f)
@@ -202,7 +331,7 @@ class GlowView(context: Context) : View(context) {
             target.isAntiAlias = true
             target.style = Paint.Style.FILL
             if (gradient != null) target.shader = gradient else target.color = solidColor ?: RED
-            if (blur != null) target.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
+            if (blur != null) target.maskFilter = blurMask(blur)
             target.alpha = paintAlpha
         }
 
@@ -237,7 +366,7 @@ class GlowView(context: Context) : View(context) {
                 }
                 target.shader = alertGradient
             }
-            if (blur != null) target.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
+            if (blur != null) target.maskFilter = blurMask(blur)
             target.alpha = paintAlpha.coerceIn(0, 255)
         }
 
@@ -380,7 +509,7 @@ class GlowView(context: Context) : View(context) {
             batteryMode && charging -> solidColor = GREEN
             batteryMode && batteryLevel <= 0.15f -> solidColor = RED
             else -> {
-                val g = SweepGradient(cx, cy, COLORS, null)
+                val g = ringGradient(cx, cy)
                 shaderMatrix.reset()
                 if (s.animMode == AnimMode.FLOW) {
                     shaderMatrix.setRotate(phase * 360f, cx, cy)
@@ -397,7 +526,7 @@ class GlowView(context: Context) : View(context) {
             target.strokeWidth = width
             target.strokeCap = Paint.Cap.ROUND
             if (gradient != null) target.shader = gradient else target.color = solidColor ?: RED
-            if (blur != null) target.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
+            if (blur != null) target.maskFilter = blurMask(blur)
             target.alpha = paintAlpha
         }
 
@@ -424,7 +553,7 @@ class GlowView(context: Context) : View(context) {
                 }
                 target.shader = alertGradient
             }
-            if (blur != null) target.maskFilter = BlurMaskFilter(blur, BlurMaskFilter.Blur.NORMAL)
+            if (blur != null) target.maskFilter = blurMask(blur)
             target.alpha = paintAlpha.coerceIn(0, 255)
         }
 

@@ -3,6 +3,7 @@ package pt.diogo.glowbar
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -61,6 +62,8 @@ private suspend fun loadApps(context: Context): List<AppInfo> = withContext(Disp
 
 @Composable
 fun PrivateAppsScreen(onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
+
     val context = LocalContext.current
     val rules = remember { AppRulesRepository(context) }
 
@@ -177,7 +180,7 @@ fun PrivateAppsScreen(onBack: () -> Unit) {
 
             item {
                 Spacer(Modifier.height(24.dp))
-                RecentEvents(rules, apps) { version++ }
+                RecentEvents(rules, apps, version) { version++ }
                 Spacer(Modifier.height(40.dp))
             }
         }
@@ -251,9 +254,10 @@ private fun ColorDot(color: Int?, onClick: () -> Unit) {
 private fun RecentEvents(
     rules: AppRulesRepository,
     apps: List<AppInfo>,
+    refreshKey: Int,
     onChanged: () -> Unit
 ) {
-    val events = rules.recentEvents()
+    val events = remember(refreshKey) { rules.recentEvents() }
     val fmt = remember { SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()) }
 
     Text("Avisos recebidos", style = MaterialTheme.typography.titleSmall)

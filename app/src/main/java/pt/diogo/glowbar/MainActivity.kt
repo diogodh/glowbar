@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
 
 private fun hasUsageAccess(context: Context): Boolean {
     val ops = context.getSystemService(AppOpsManager::class.java) ?: return false
-    val mode = ops.unsafeCheckOpNoThrow(
+    val mode = ops.checkOpNoThrow(
         AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName
     )
     return mode == AppOpsManager.MODE_ALLOWED
@@ -137,11 +137,38 @@ fun SettingsScreen(
         s = repo.load()
     }
 
+    val startClassicOrRequestOverlay: () -> Unit = {
+        val current = repo.load()
+        if (current.enabled && !current.accessibilityMode) {
+            if (!Settings.canDrawOverlays(context)) {
+                context.startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + context.packageName)
+                    )
+                )
+            } else {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, GlowOverlayService::class.java)
+                        .setAction(GlowOverlayService.ACTION_START)
+                )
+            }
+        }
+    }
+
     val notifPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { }
+    ) {
+        // Concedida ou recusada, continua o fluxo. A permissão de notificações
+        // não é necessária para desenhar o overlay, apenas para mostrar a
+        // notificação de controlo do foreground service.
+        startClassicOrRequestOverlay()
+    }
+
     fun apply(new: GlowSettings) {
         val wasEnabled = s.enabled
+        val wasAccessibilityMode = s.accessibilityMode
         s = new
         repo.save(new)
 
@@ -168,30 +195,20 @@ fun SettingsScreen(
         // de acessibilidade que ainda esteja ativo.
         GlowAccessibilityService.instance?.refresh()
 
-        if (!Settings.canDrawOverlays(context)) {
-            context.startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + context.packageName)
-                )
-            )
-            return
-        }
-
-        if (!wasEnabled && Build.VERSION.SDK_INT >= 33 &&
+        // Pede primeiro POST_NOTIFICATIONS. Abrir imediatamente a página da
+        // permissão de overlay podia impedir este diálogo de aparecer.
+        val enteringClassicMode = !wasEnabled || wasAccessibilityMode
+        if (enteringClassicMode && Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
         }
 
-        ContextCompat.startForegroundService(
-            context,
-            Intent(context, GlowOverlayService::class.java)
-                .setAction(GlowOverlayService.ACTION_START)
-        )
+        startClassicOrRequestOverlay()
     }
 
     Column(
@@ -402,12 +419,44 @@ fun SettingsScreen(
             s.tapToOpen
         ) { apply(s.copy(tapToOpen = it)) }
 
-        Stepper(
-            label = if (s.pendingTimeoutMin == 0) "Expirar sozinho: nunca"
-            else "Expirar sozinho: " + s.pendingTimeoutMin + " min",
-            value = s.pendingTimeoutMin,
-            unit = "min"
-        ) { apply(s.copy(pendingTimeoutMin = it.coerceIn(0, 120))) }
+        Section(
+            if (s.pendingTimeoutSec == 0) "Duração do aviso: até abrir a app"
+            else "Duração do aviso: " + formatTimeout(s.pendingTimeoutSec)
+        )
+        ChipRow(
+            listOf(
+                0 to "Até abrir",
+                5 to "5s",
+                10 to "10s",
+                30 to "30s",
+                60 to "1min",
+                300 to "5min",
+                1800 to "30min"
+            ),
+            s.pendingTimeoutSec
+        ) { apply(s.copy(pendingTimeoutSec = it)) }
+
+        ToggleRow(
+            "Acordar o ecrã",
+            "Liga o ecrã por alguns segundos quando chega aviso de uma app " +
+                "privada, para veres o glow com o telefone pousado",
+            s.wakeScreen
+        ) { apply(s.copy(wakeScreen = it)) }
+
+        if (s.wakeScreen) {
+            Section("Ecrã ligado durante: " + s.wakeScreenSec + "s")
+            Slider(
+                value = s.wakeScreenSec.toFloat(),
+                onValueChange = { s = s.copy(wakeScreenSec = it.toInt()) },
+                onValueChangeFinished = { apply(s) },
+                valueRange = 2f..30f
+            )
+            Text(
+                "Se o glow aparece por cima do ecrã de bloqueio depende do " +
+                    "fabricante do telefone. Usar isto com frequência gasta bateria.",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
 
         if (s.pendingUntilOpened && !s.accessibilityMode && !hasUsageAccess(context)) {
             Spacer(Modifier.height(12.dp))
@@ -514,6 +563,12 @@ private fun StatusPanel(s: GlowSettings, context: Context) {
             }
         }
     }
+}
+
+private fun formatTimeout(sec: Int): String = when {
+    sec < 60 -> sec.toString() + "s"
+    sec % 60 == 0 && sec < 3600 -> (sec / 60).toString() + "min"
+    else -> (sec / 60).toString() + "min"
 }
 
 @Composable

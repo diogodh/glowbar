@@ -13,7 +13,9 @@ import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -21,6 +23,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import androidx.core.content.ContextCompat
 import pt.diogo.glowbar.AppRulesRepository
 import pt.diogo.glowbar.GlowSettings
 import pt.diogo.glowbar.Position
@@ -68,6 +71,17 @@ class GlowController(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var glowView: GlowView? = null
+    private var touchView: View? = null
+    private var detectedCutoutRect: RectF? = null
+
+    @Volatile
+    private var screenOn = true
+
+    @Volatile
+    private var currentForegroundPackage: String? = null
+
+    private var wakeLock: PowerManager.WakeLock? = null
+
     var settings: GlowSettings? = null
         private set
 
@@ -81,9 +95,49 @@ class GlowController(
     private val progressMap = LinkedHashMap<String, Float>()
     private val pending = LinkedHashMap<String, PendingAlert>()
     private val pendingTimeouts = mutableMapOf<String, Runnable>()
+
+    /**
+     * Contagem para expirar um aviso. Só corre com o ecrã ligado: com o
+     * telefone pousado, um aviso curto expiraria sem o utilizador ter tido
+     * qualquer hipótese de o ver — e a notificação original já foi suprimida.
+     *
+     * `startedAt` é o instante (elapsedRealtime) em que a contagem retomou;
+     * 0 significa pausada.
+     */
+    private data class TimeoutState(
+        val receivedAt: Long,
+        var remainingMs: Long,
+        var startedAt: Long = 0L
+    )
+
+    private val timeoutStates = mutableMapOf<String, TimeoutState>()
     private var pendingLoaded = false
     private var pollScheduled = false
     private var lastUsageQueryAt = 0L
+
+    /**
+     * Com o ecrã apagado nada do overlay é visível, por isso não faz sentido
+     * manter o animador a desenhar. Isto elimina o consumo de CPU durante a
+     * maior parte do dia, que é quando o telefone está pousado.
+     */
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            when (i.action) {
+                Intent.ACTION_SCREEN_ON -> {
+                    screenOn = true
+                    glowView?.setScreenOn(true)
+                    resumePendingTimeouts()
+                    updateTouchOverlay()
+                }
+                Intent.ACTION_SCREEN_OFF -> {
+                    screenOn = false
+                    glowView?.setScreenOn(false)
+                    pausePendingTimeouts()
+                    updateTouchOverlay()
+                }
+            }
+        }
+    }
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -104,9 +158,23 @@ class GlowController(
 
         if (!receiverRegistered) {
             runCatching {
-                context.registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                ContextCompat.registerReceiver(
+                    context,
+                    batteryReceiver,
+                    IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+                ContextCompat.registerReceiver(
+                    context,
+                    screenReceiver,
+                    IntentFilter().apply {
+                        addAction(Intent.ACTION_SCREEN_ON)
+                        addAction(Intent.ACTION_SCREEN_OFF)
+                    },
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
                 receiverRegistered = true
-            }.onFailure { Log.w(TAG, "Não foi possível registar o estado da bateria", it) }
+            }.onFailure { Log.w(TAG, "Não foi possível registar os eventos do sistema", it) }
         }
 
         rebuild()
@@ -115,15 +183,23 @@ class GlowController(
     fun stop() {
         mainHandler.removeCallbacksAndMessages(null)
         pendingTimeouts.clear()
+        timeoutStates.clear()
         pollScheduled = false
+
+        removeTouchOverlay()
 
         glowView?.let { view ->
             runCatching { wm.removeView(view) }
                 .onFailure { Log.w(TAG, "Falha ao remover o overlay", it) }
         }
         glowView = null
+        detectedCutoutRect = null
+        currentForegroundPackage = null
+        wakeLock?.let { lock -> if (lock.isHeld) runCatching { lock.release() } }
+        wakeLock = null
 
         if (receiverRegistered) {
+            runCatching { context.unregisterReceiver(screenReceiver) }
             runCatching { context.unregisterReceiver(batteryReceiver) }
             receiverRegistered = false
         }
@@ -164,7 +240,9 @@ class GlowController(
         newView.setOnApplyWindowInsetsListener { _, insets ->
             if (Build.VERSION.SDK_INT >= 28) {
                 val r = insets.displayCutout?.boundingRects?.firstOrNull()
-                newView.cutoutRect = r?.let { RectF(it) }
+                detectedCutoutRect = r?.let { RectF(it) }
+                newView.cutoutRect = detectedCutoutRect
+                updateTouchOverlay()
             }
             if (Build.VERSION.SDK_INT >= 30) {
                 val fullscreen = !insets.isVisible(WindowInsets.Type.statusBars())
@@ -177,18 +255,22 @@ class GlowController(
             insets
         }
 
-        newView.setOnTouchListener { _, event ->
-            if (event.action == MotionEvent.ACTION_UP && pending.isNotEmpty()) {
-                openMostRecentPending()
-            }
-            true
-        }
 
         // Mantém a vista antiga até sabermos que a nova foi adicionada com sucesso.
         // Assim uma alteração inválida não deixa a app a suprimir notificações sem glow.
         glowView = newView
+        // Uma vista nova tem de nascer a saber se o ecrã está ligado.
+        runCatching {
+            val pm = context.getSystemService(PowerManager::class.java)
+            if (pm != null) {
+                screenOn = pm.isInteractive
+                newView.setScreenOn(screenOn)
+            }
+        }
+
+        removeTouchOverlay()
         val added = runCatching {
-            wm.addView(newView, buildParams(newSettings))
+            wm.addView(newView, buildVisualParams(newSettings))
         }.onFailure {
             Log.e(TAG, "Não foi possível adicionar o overlay", it)
         }.isSuccess
@@ -199,6 +281,8 @@ class GlowController(
             if (oldView == null) {
                 if (active === this) active = null
                 onStopRequested()
+            } else {
+                updateTouchOverlay()
             }
             return
         }
@@ -226,7 +310,7 @@ class GlowController(
 
     private fun dpToPx(v: Int) = (v * context.resources.displayMetrics.density).toInt()
 
-    private fun buildParams(s: GlowSettings): WindowManager.LayoutParams {
+    private fun buildVisualParams(s: GlowSettings): WindowManager.LayoutParams {
         val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
@@ -259,9 +343,17 @@ class GlowController(
                 lp.x = dpToPx(s.offsetFromEdgeDp) - pad
             }
         } else {
+            // Dimensiona a janela para incluir também deslocamentos verticais
+            // positivos e escalas grandes, evitando cortar o anel aos 240 dp.
+            val estimatedRadiusDp = 36f * maxOf(s.hScale, s.vScale) +
+                s.strokeDp + GlowView.PAD_DP
+            val requiredHeightDp = maxOf(
+                240,
+                (80f + s.cutoutOffsetYDp.coerceAtLeast(0) + estimatedRadiusDp).toInt()
+            )
             lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
-                dpToPx(240),
+                dpToPx(requiredHeightDp),
                 windowType,
                 flags,
                 PixelFormat.TRANSLUCENT
@@ -279,6 +371,21 @@ class GlowController(
     private fun updateVisibility() {
         glowView?.visibility =
             if (hiddenTemp || hiddenFullscreen) View.GONE else View.VISIBLE
+        updateTouchOverlay()
+    }
+
+    /**
+     * Só permite suprimir uma notificação privada quando existe uma forma
+     * fiável de o utilizador ver o aviso. Com avisos persistentes, o estado é
+     * gravado antes do cancelamento e pode reaparecer quando o overlay voltar a
+     * ficar visível. Sem persistência, exige ecrã ligado e glow visível.
+     */
+    fun canSafelySuppressPrivateNotification(): Boolean {
+        val s = settings ?: return false
+        val view = glowView ?: return false
+        if (active !== this || !s.enabled) return false
+        if (s.pendingUntilOpened) return true
+        return screenOn && !hiddenTemp && !hiddenFullscreen && view.visibility == View.VISIBLE
     }
 
     // -------------------------------------------------------------- pendências
@@ -325,10 +432,16 @@ class GlowController(
     private fun handlePrivateNotification(color: Int?, pkg: String) {
         val s = settings ?: return
         glowView?.flash(color)
+        wakeScreenIfNeeded(s)
         if (!s.pendingUntilOpened) return
+
+        // Se a própria app já está em primeiro plano, não cria um aviso que
+        // nunca receberia um novo evento de abertura para ser limpo.
+        if (isPackageCurrentlyForeground(pkg)) return
 
         val now = System.currentTimeMillis()
         pendingTimeouts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
+        timeoutStates.remove(pkg)
         pending.remove(pkg)
         pending[pkg] = PendingAlert(color = color, receivedAt = now)
         rulesRepo.upsertPending(pkg, now, color)
@@ -340,6 +453,34 @@ class GlowController(
         schedulePendingTimeout(pkg, s)
         pushPending()
         if (!foregroundFromAccessibility) startPolling()
+    }
+
+    /**
+     * Acorda o ecrã por alguns segundos, para o sinal luminoso ser visível com
+     * o telefone pousado. Não faz nada se o ecrã já estiver ligado.
+     *
+     * Nota honesta: se o overlay fica ou não visível por cima do ecrã de
+     * bloqueio depende do fabricante — nalguns aparece, noutros o keyguard
+     * tapa-o. Não há forma de o garantir a partir da app.
+     */
+    @Suppress("DEPRECATION")
+    private fun wakeScreenIfNeeded(s: GlowSettings) {
+        if (!s.wakeScreen) return
+        val pm = context.getSystemService(PowerManager::class.java) ?: return
+        if (pm.isInteractive) return
+
+        runCatching {
+            val lock = wakeLock ?: pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "glowbar:private-alert"
+            ).apply {
+                setReferenceCounted(false)
+                wakeLock = this
+            }
+            if (lock.isHeld) lock.release()
+            // acquire(timeout) liberta-se sozinho, evitando ficar preso.
+            lock.acquire(s.wakeScreenSec.coerceIn(2, 30) * 1000L)
+        }.onFailure { Log.w(TAG, "Não foi possível acordar o ecrã", it) }
     }
 
     fun updatePendingColor(pkg: String, color: Int?) {
@@ -381,25 +522,68 @@ class GlowController(
 
     private fun schedulePendingTimeout(pkg: String, s: GlowSettings) {
         pendingTimeouts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
-        if (s.pendingTimeoutMin <= 0) return
 
-        val alert = pending[pkg] ?: return
-        val expiresAt = alert.receivedAt + s.pendingTimeoutMin * 60_000L
-        val delay = expiresAt - System.currentTimeMillis()
-        if (delay <= 0L) {
+        if (s.pendingTimeoutSec <= 0) {
+            timeoutStates.remove(pkg)
+            return
+        }
+
+        val alert = pending[pkg] ?: run {
+            timeoutStates.remove(pkg)
+            return
+        }
+
+        val total = s.pendingTimeoutSec * 1000L
+        val existing = timeoutStates[pkg]
+        // Uma notificação nova da mesma app (receivedAt diferente) reinicia a
+        // contagem; caso contrário retoma-se o que faltava.
+        val remaining = if (existing != null && existing.receivedAt == alert.receivedAt) {
+            existing.remainingMs.coerceAtMost(total)
+        } else {
+            total
+        }
+
+        val state = TimeoutState(alert.receivedAt, remaining)
+        timeoutStates[pkg] = state
+
+        // Ecrã apagado: fica em pausa e só retoma quando o ecrã ligar.
+        if (!screenOn) return
+
+        if (remaining <= 0L) {
             removePendingInternal(pkg)
             return
         }
 
+        state.startedAt = SystemClock.elapsedRealtime()
         val expectedReceivedAt = alert.receivedAt
         val runnable = Runnable {
             pendingTimeouts.remove(pkg)
+            timeoutStates.remove(pkg)
             if (pending[pkg]?.receivedAt == expectedReceivedAt) {
                 removePendingInternal(pkg)
             }
         }
         pendingTimeouts[pkg] = runnable
-        mainHandler.postDelayed(runnable, delay)
+        mainHandler.postDelayed(runnable, remaining)
+    }
+
+    /** Congela o que falta a cada aviso e cancela os agendamentos. */
+    private fun pausePendingTimeouts() {
+        val now = SystemClock.elapsedRealtime()
+        timeoutStates.forEach { (pkg, state) ->
+            if (state.startedAt > 0L) {
+                val elapsed = now - state.startedAt
+                state.remainingMs = (state.remainingMs - elapsed).coerceAtLeast(0L)
+                state.startedAt = 0L
+            }
+            pendingTimeouts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
+        }
+    }
+
+    /** Retoma as contagens quando o ecrã volta a ligar. */
+    private fun resumePendingTimeouts() {
+        val s = settings ?: return
+        pending.keys.toList().forEach { schedulePendingTimeout(it, s) }
     }
 
     private fun pushPending() {
@@ -414,6 +598,7 @@ class GlowController(
     private fun removePendingInternal(pkg: String, push: Boolean = true): Boolean {
         if (!pending.containsKey(pkg)) return false
         pending.remove(pkg)
+        timeoutStates.remove(pkg)
         pendingTimeouts.remove(pkg)?.let { mainHandler.removeCallbacks(it) }
         rulesRepo.removePending(pkg)
         if (push) pushPending()
@@ -423,6 +608,7 @@ class GlowController(
     private fun clearAllPendingInternal() {
         pendingTimeouts.values.forEach { mainHandler.removeCallbacks(it) }
         pendingTimeouts.clear()
+        timeoutStates.clear()
         pending.clear()
         rulesRepo.clearPending()
         pushPending()
@@ -431,6 +617,7 @@ class GlowController(
     /** Chamado pelo serviço de acessibilidade quando muda a app em primeiro plano. */
     fun onForegroundApp(pkg: String) {
         mainHandler.post {
+            currentForegroundPackage = pkg
             val alert = pending[pkg] ?: return@post
             if (System.currentTimeMillis() >= alert.receivedAt) {
                 removePendingInternal(pkg)
@@ -442,11 +629,23 @@ class GlowController(
 
     private fun hasUsageAccess(): Boolean {
         val ops = context.getSystemService(AppOpsManager::class.java) ?: return false
-        return ops.unsafeCheckOpNoThrow(
+        return ops.checkOpNoThrow(
             AppOpsManager.OPSTR_GET_USAGE_STATS,
             Process.myUid(),
             context.packageName
         ) == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun isPackageCurrentlyForeground(pkg: String): Boolean {
+        if (currentForegroundPackage == pkg) return true
+        if (foregroundFromAccessibility || !hasUsageAccess()) return false
+
+        val now = System.currentTimeMillis()
+        val latest = foregroundEvents(max(0L, now - 6 * 60 * 60 * 1000L), now)
+            .maxByOrNull { it.timestamp }
+            ?.pkg
+        currentForegroundPackage = latest
+        return latest == pkg
     }
 
     private fun foregroundEvents(from: Long, to: Long): List<ForegroundEvent> {
@@ -457,8 +656,7 @@ class GlowController(
             while (events.hasNextEvent()) {
                 events.getNextEvent(event)
                 val movedToForeground =
-                    event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                        event.eventType == UsageEvents.Event.ACTIVITY_RESUMED
+                    event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND
                 val pkg = event.packageName
                 if (movedToForeground && !pkg.isNullOrBlank()) {
                     add(ForegroundEvent(pkg, event.timeStamp))
@@ -482,6 +680,7 @@ class GlowController(
                 )
 
                 foregroundEvents(from, now).forEach { event ->
+                    currentForegroundPackage = event.pkg
                     val alert = pending[event.pkg]
                     // Só limpa se a app tiver passado para primeiro plano DEPOIS
                     // desta notificação; eventos antigos não podem apagar avisos novos.
@@ -506,20 +705,123 @@ class GlowController(
     // -------------------------------------------------------- toque para abrir
 
     private fun updateTouchable() {
-        val view = glowView ?: return
-        val s = settings ?: return
-        val wantTouch = s.tapToOpen && pending.isNotEmpty()
-        val lp = (view.layoutParams as? WindowManager.LayoutParams) ?: return
-        val isTouchable = (lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
-        if (wantTouch == isTouchable) return
+        updateTouchOverlay()
+    }
 
-        lp.flags = if (wantTouch) {
-            lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        } else {
-            lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+    private fun updateTouchOverlay() {
+        val s = settings
+        val shouldShow = s != null && s.tapToOpen && pending.isNotEmpty() &&
+            screenOn && !hiddenTemp && !hiddenFullscreen &&
+            glowView?.visibility == View.VISIBLE && active === this
+
+        if (!shouldShow || s == null) {
+            removeTouchOverlay()
+            return
         }
-        runCatching { wm.updateViewLayout(view, lp) }
-            .onFailure { Log.w(TAG, "Não foi possível atualizar o toque do overlay", it) }
+
+        val existing = touchView
+        if (existing == null) {
+            val view = View(context).apply {
+                isClickable = true
+                setOnTouchListener { _, event ->
+                    if (event.action == MotionEvent.ACTION_UP && pending.isNotEmpty()) {
+                        openMostRecentPending()
+                    }
+                    true
+                }
+            }
+            val added = runCatching {
+                wm.addView(view, buildTouchParams(s))
+            }.onFailure {
+                Log.w(TAG, "Não foi possível criar a área de toque", it)
+            }.isSuccess
+            if (added) touchView = view
+        } else {
+            runCatching { wm.updateViewLayout(existing, buildTouchParams(s)) }
+                .onFailure { Log.w(TAG, "Não foi possível atualizar a área de toque", it) }
+        }
+    }
+
+    private fun removeTouchOverlay() {
+        val view = touchView ?: return
+        touchView = null
+        runCatching { wm.removeView(view) }
+            .onFailure { Log.w(TAG, "Não foi possível remover a área de toque", it) }
+    }
+
+    /**
+     * A janela visual é sempre intocável. Esta segunda janela transparente é
+     * pequena e existe apenas enquanto há avisos pendentes, evitando bloquear
+     * toda a faixa superior no modo cutout.
+     */
+    private fun buildTouchParams(s: GlowSettings): WindowManager.LayoutParams {
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        val pad = dpToPx(12)
+
+        if (s.shape == Shape.BAR) {
+            val horizontal = s.position == Position.TOP || s.position == Position.BOTTOM
+            val len = dpToPx(s.widthDp) + pad * 2
+            val cross = dpToPx(maxOf(s.thicknessDp + 20, 36))
+            return WindowManager.LayoutParams(
+                if (horizontal) len else cross,
+                if (horizontal) cross else len,
+                windowType,
+                flags,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = when (s.position) {
+                    Position.TOP -> Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                    Position.BOTTOM -> Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    Position.LEFT -> Gravity.LEFT or Gravity.CENTER_VERTICAL
+                    Position.RIGHT -> Gravity.RIGHT or Gravity.CENTER_VERTICAL
+                }
+                if (horizontal) {
+                    x = dpToPx(s.offsetAlongDp)
+                    y = dpToPx(s.offsetFromEdgeDp)
+                } else {
+                    y = dpToPx(s.offsetAlongDp)
+                    x = dpToPx(s.offsetFromEdgeDp)
+                }
+                if (Build.VERSION.SDK_INT >= 28) {
+                    layoutInDisplayCutoutMode =
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
+            }
+        }
+
+        val metrics = context.resources.displayMetrics
+        val base = detectedCutoutRect ?: RectF(
+            metrics.widthPixels / 2f - dpToPx(22),
+            dpToPx(18).toFloat(),
+            metrics.widthPixels / 2f + dpToPx(22),
+            dpToPx(62).toFloat()
+        )
+        val stroke = dpToPx(s.strokeDp).toFloat()
+        val baseRadius = base.width() / 2f + stroke / 2f + dpToPx(10)
+        val halfWidth = baseRadius * s.hScale + pad
+        val halfHeight = baseRadius * s.vScale + pad
+        val width = (halfWidth * 2f).toInt().coerceAtLeast(dpToPx(48))
+        val height = (halfHeight * 2f).toInt().coerceAtLeast(dpToPx(48))
+        val centerX = base.centerX() + dpToPx(s.cutoutOffsetXDp)
+        val centerY = base.centerY() + dpToPx(s.cutoutOffsetYDp)
+
+        return WindowManager.LayoutParams(
+            width,
+            height,
+            windowType,
+            flags,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.LEFT
+            x = (centerX - width / 2f).toInt()
+            y = (centerY - height / 2f).toInt()
+            if (Build.VERSION.SDK_INT >= 28) {
+                layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
     }
 
     private fun openMostRecentPending() {

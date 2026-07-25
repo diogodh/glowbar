@@ -53,10 +53,9 @@ class GlowAccessibilityService : AccessibilityService() {
             e.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) return
 
-        val settings = SettingsRepository(this).load()
-        if (!settings.enabled || !settings.accessibilityMode) return
-
         val c = controller ?: return
+        val currentSettings = c.settings ?: return
+        if (!currentSettings.enabled || !currentSettings.accessibilityMode) return
         if (GlowController.active !== c) return
         val pkg = e.packageName?.toString() ?: return
         c.onForegroundApp(pkg)

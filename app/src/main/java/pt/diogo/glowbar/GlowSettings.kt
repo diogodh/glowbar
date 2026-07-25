@@ -40,7 +40,11 @@ data class GlowSettings(
     // Avisos persistentes das apps privadas
     val pendingUntilOpened: Boolean = true,
     val tapToOpen: Boolean = true,
-    val pendingTimeoutMin: Int = 0,  // 0 = nunca expira
+    val pendingTimeoutSec: Int = 0,  // 0 = nunca expira
+
+    // Acordar o ecrã quando chega aviso de uma app privada
+    val wakeScreen: Boolean = false,
+    val wakeScreenSec: Int = 5,
 
     // Aparência em repouso
     val idleDim: Boolean = false,
@@ -70,6 +74,18 @@ class SettingsRepository(private val context: Context) {
             enumValueOf<T>(prefs.getString(key, default.name) ?: default.name)
         }.getOrDefault(default)
 
+    /**
+     * Versões anteriores guardavam o tempo em minutos. Se ainda não existir a
+     * chave em segundos, converte o valor antigo para não perder a definição.
+     */
+    private fun readTimeoutSec(): Int {
+        if (prefs.contains("pendingTimeoutSec")) {
+            return prefs.getInt("pendingTimeoutSec", 0).coerceIn(0, 7200)
+        }
+        val legacyMin = prefs.getInt("pendingTimeoutMin", 0).coerceIn(0, 120)
+        return legacyMin * 60
+    }
+
     fun load(): GlowSettings = GlowSettings(
         enabled = prefs.getBoolean("enabled", false),
         shape = enumValue("shape", Shape.BAR),
@@ -92,7 +108,9 @@ class SettingsRepository(private val context: Context) {
         autoHideFullscreen = prefs.getBoolean("autoHideFullscreen", true),
         pendingUntilOpened = prefs.getBoolean("pendingUntilOpened", true),
         tapToOpen = prefs.getBoolean("tapToOpen", true),
-        pendingTimeoutMin = prefs.getInt("pendingTimeoutMin", 0).coerceIn(0, 120),
+        pendingTimeoutSec = readTimeoutSec(),
+        wakeScreen = prefs.getBoolean("wakeScreen", false),
+        wakeScreenSec = prefs.getInt("wakeScreenSec", 5).coerceIn(2, 30),
         idleDim = prefs.getBoolean("idleDim", false),
         idleAlphaPct = prefs.getInt("idleAlphaPct", 15).coerceIn(0, 60),
         accessibilityMode = prefs.getBoolean("accessibilityMode", false)
@@ -121,7 +139,9 @@ class SettingsRepository(private val context: Context) {
             putBoolean("autoHideFullscreen", s.autoHideFullscreen)
             putBoolean("pendingUntilOpened", s.pendingUntilOpened)
             putBoolean("tapToOpen", s.tapToOpen)
-            putInt("pendingTimeoutMin", s.pendingTimeoutMin)
+            putInt("pendingTimeoutSec", s.pendingTimeoutSec)
+            putBoolean("wakeScreen", s.wakeScreen)
+            putInt("wakeScreenSec", s.wakeScreenSec)
             putBoolean("idleDim", s.idleDim)
             putInt("idleAlphaPct", s.idleAlphaPct)
             putBoolean("accessibilityMode", s.accessibilityMode)
