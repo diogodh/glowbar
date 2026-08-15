@@ -23,6 +23,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.Surface
 import androidx.core.content.ContextCompat
 import pt.diogo.glowbar.AppRulesRepository
 import pt.diogo.glowbar.GlowSettings
@@ -73,6 +74,16 @@ class GlowController(
     private var glowView: GlowView? = null
     private var touchView: View? = null
     private var detectedCutoutRect: RectF? = null
+
+    /**
+     * Geometria do punch-hole em coordenadas normalizadas da orientação natural
+     * (portrait). Em landscape, o Android pode devolver um boundingRect de
+     * letterboxing em vez do pequeno cutout físico; nesse caso reutilizamos a
+     * geometria física e apenas rodamos a sua posição.
+     */
+    private var cachedCutoutWidthPx: Float? = null
+    private var cachedCutoutCenterXNorm: Float? = null
+    private var cachedCutoutCenterYNorm: Float? = null
 
     @Volatile
     private var screenOn = true
@@ -194,6 +205,9 @@ class GlowController(
         }
         glowView = null
         detectedCutoutRect = null
+        cachedCutoutWidthPx = null
+        cachedCutoutCenterXNorm = null
+        cachedCutoutCenterYNorm = null
         currentForegroundPackage = null
         wakeLock?.let { lock -> if (lock.isHeld) runCatching { lock.release() } }
         wakeLock = null
@@ -213,6 +227,86 @@ class GlowController(
     }
 
     fun isHiddenTemporarily() = hiddenTemp
+
+    /**
+     * Aceita apenas retângulos compatíveis com um punch-hole físico. Os limites
+     * são deliberadamente largos: a dimensão deve ser pequena relativamente ao
+     * ecrã, mas não assumimos um diâmetro fixo para todos os equipamentos.
+     */
+    private fun plausibleCutout(rect: RectF): Boolean {
+        val density = context.resources.displayMetrics.density
+        val wDp = rect.width() / density
+        val hDp = rect.height() / density
+        return wDp in 8f..90f && hDp in 8f..90f
+    }
+
+    /**
+     * Converte a posição do punch-hole guardada em portrait para a orientação
+     * atual. A largura/altura atuais são as da superfície já rodada.
+     */
+    private fun cachedCutoutCenterForCurrentRotation(): Pair<Float, Float>? {
+        val cx = cachedCutoutCenterXNorm ?: return null
+        val cy = cachedCutoutCenterYNorm ?: return null
+        val metrics = context.resources.displayMetrics
+        val w = metrics.widthPixels.toFloat()
+        val h = metrics.heightPixels.toFloat()
+        val rotation = wm.defaultDisplay.rotation
+
+        val (nx, ny) = when (rotation) {
+            Surface.ROTATION_0 -> cx to cy
+            Surface.ROTATION_90 -> (1f - cy) to cx
+            Surface.ROTATION_180 -> (1f - cx) to (1f - cy)
+            Surface.ROTATION_270 -> cy to (1f - cx)
+            else -> cx to cy
+        }
+        return nx * w to ny * h
+    }
+
+    private fun updateCutoutGeometry(insets: WindowInsets) {
+        if (Build.VERSION.SDK_INT < 28) return
+
+        val candidate = insets.displayCutout?.boundingRects?.firstOrNull()?.let { RectF(it) }
+        val metrics = context.resources.displayMetrics
+
+        if (candidate != null && plausibleCutout(candidate)) {
+            // Uma deteção pequena é a melhor fonte de verdade. Guardamo-la em
+            // coordenadas normalizadas da orientação natural (portrait).
+            val rotation = wm.defaultDisplay.rotation
+            val w = metrics.widthPixels.toFloat()
+            val h = metrics.heightPixels.toFloat()
+            val currentX = candidate.centerX() / w
+            val currentY = candidate.centerY() / h
+
+            val (naturalX, naturalY) = when (rotation) {
+                Surface.ROTATION_0 -> currentX to currentY
+                Surface.ROTATION_90 -> currentY to (1f - currentX)
+                Surface.ROTATION_180 -> (1f - currentX) to (1f - currentY)
+                Surface.ROTATION_270 -> (1f - currentY) to currentX
+                else -> currentX to currentY
+            }
+
+            cachedCutoutWidthPx = candidate.width()
+            cachedCutoutCenterXNorm = naturalX
+            cachedCutoutCenterYNorm = naturalY
+            detectedCutoutRect = candidate
+        } else if (cachedCutoutWidthPx != null) {
+            // Landscape/letterbox: não aceitamos a caixa gigante. Reconstruímos
+            // uma caixa quadrada do mesmo diâmetro físico na posição rodada.
+            val center = cachedCutoutCenterForCurrentRotation()
+            if (center != null) {
+                val half = cachedCutoutWidthPx!! / 2f
+                detectedCutoutRect = RectF(
+                    center.first - half,
+                    center.second - half,
+                    center.first + half,
+                    center.second + half
+                )
+            }
+        }
+
+        glowView?.cutoutRect = detectedCutoutRect
+        updateTouchOverlay()
+    }
 
     fun rebuild() {
         val newSettings = repo.load()
@@ -238,12 +332,7 @@ class GlowController(
         }
 
         newView.setOnApplyWindowInsetsListener { _, insets ->
-            if (Build.VERSION.SDK_INT >= 28) {
-                val r = insets.displayCutout?.boundingRects?.firstOrNull()
-                detectedCutoutRect = r?.let { RectF(it) }
-                newView.cutoutRect = detectedCutoutRect
-                updateTouchOverlay()
-            }
+            updateCutoutGeometry(insets)
             if (Build.VERSION.SDK_INT >= 30) {
                 val fullscreen = !insets.isVisible(WindowInsets.Type.statusBars())
                 val hide = fullscreen && (settings?.autoHideFullscreen == true)
@@ -351,9 +440,11 @@ class GlowController(
                 240,
                 (80f + s.cutoutOffsetYDp.coerceAtLeast(0) + estimatedRadiusDp).toInt()
             )
+            val rotation = wm.defaultDisplay.rotation
+            val landscape = rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270
             lp = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
-                dpToPx(requiredHeightDp),
+                if (landscape) WindowManager.LayoutParams.MATCH_PARENT else dpToPx(requiredHeightDp),
                 windowType,
                 flags,
                 PixelFormat.TRANSLUCENT
