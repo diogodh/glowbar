@@ -52,6 +52,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import pt.diogo.glowbar.overlay.GlowAccessibilityService
 import pt.diogo.glowbar.overlay.GlowOverlayService
 
@@ -60,16 +61,31 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // A interface de definições deve respeitar a status bar e a
+        // navigation bar. A Glowbar propriamente dita é um overlay
+        // independente e continua a poder usar o display cutout.
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+
         val repo = SettingsRepository(this)
+
         setContent {
             val refreshKey = resumeVersion.intValue
+
             MaterialTheme(
-                colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()
+                colorScheme = if (isSystemInDarkTheme()) {
+                    darkColorScheme()
+                } else {
+                    lightColorScheme()
+                }
             ) {
                 Surface(Modifier.fillMaxSize()) {
                     var showPrivate by remember { mutableStateOf(false) }
+
                     if (showPrivate) {
-                        PrivateAppsScreen(onBack = { showPrivate = false })
+                        PrivateAppsScreen(
+                            onBack = { showPrivate = false }
+                        )
                     } else {
                         SettingsScreen(
                             repo = repo,
@@ -98,9 +114,8 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        // Se a permissão de acessibilidade continuar concedida de uma utilização
-        // anterior, garante que o overlay desse modo fica parado.
         GlowAccessibilityService.instance?.refresh()
+
         if (!Settings.canDrawOverlays(this)) return
 
         ContextCompat.startForegroundService(
@@ -113,9 +128,13 @@ class MainActivity : ComponentActivity() {
 
 private fun hasUsageAccess(context: Context): Boolean {
     val ops = context.getSystemService(AppOpsManager::class.java) ?: return false
+
     val mode = ops.checkOpNoThrow(
-        AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName
+        AppOpsManager.OPSTR_GET_USAGE_STATS,
+        Process.myUid(),
+        context.packageName
     )
+
     return mode == AppOpsManager.MODE_ALLOWED
 }
 
@@ -139,6 +158,7 @@ fun SettingsScreen(
 
     val startClassicOrRequestOverlay: () -> Unit = {
         val current = repo.load()
+
         if (current.enabled && !current.accessibilityMode) {
             if (!Settings.canDrawOverlays(context)) {
                 context.startActivity(
@@ -160,15 +180,13 @@ fun SettingsScreen(
     val notifPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) {
-        // Concedida ou recusada, continua o fluxo. A permissão de notificações
-        // não é necessária para desenhar o overlay, apenas para mostrar a
-        // notificação de controlo do foreground service.
         startClassicOrRequestOverlay()
     }
 
     fun apply(new: GlowSettings) {
         val wasEnabled = s.enabled
         val wasAccessibilityMode = s.accessibilityMode
+
         s = new
         repo.save(new)
 
@@ -178,27 +196,29 @@ fun SettingsScreen(
             return
         }
 
-        // Modo de acessibilidade: o overlay é gerido pelo próprio serviço,
-        // sem foreground service nem permissão de sobreposição.
         if (new.accessibilityMode) {
             context.stopService(Intent(context, GlowOverlayService::class.java))
+
             val svc = GlowAccessibilityService.instance
+
             if (svc == null) {
-                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                context.startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                )
             } else {
                 svc.refresh()
             }
+
             return
         }
 
-        // Ao regressar ao modo clássico, para imediatamente qualquer overlay
-        // de acessibilidade que ainda esteja ativo.
         GlowAccessibilityService.instance?.refresh()
 
-        // Pede primeiro POST_NOTIFICATIONS. Abrir imediatamente a página da
-        // permissão de overlay podia impedir este diálogo de aparecer.
         val enteringClassicMode = !wasEnabled || wasAccessibilityMode
-        if (enteringClassicMode && Build.VERSION.SDK_INT >= 33 &&
+
+        if (
+            enteringClassicMode &&
+            Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
@@ -216,28 +236,47 @@ fun SettingsScreen(
             .verticalScroll(rememberScrollState())
             .padding(20.dp)
     ) {
-        Text("Glowbar", style = MaterialTheme.typography.headlineLarge)
+        Text(
+            "Glowbar",
+            style = MaterialTheme.typography.headlineLarge
+        )
+
         Spacer(Modifier.height(20.dp))
 
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 "Mostrar Glowbar",
                 Modifier.weight(1f),
                 style = MaterialTheme.typography.titleMedium
             )
-            Switch(checked = s.enabled, onCheckedChange = { apply(s.copy(enabled = it)) })
+
+            Switch(
+                checked = s.enabled,
+                onCheckedChange = {
+                    apply(s.copy(enabled = it))
+                }
+            )
         }
 
         StatusPanel(s, context)
 
         Section("Forma")
+
         ChipRow(
-            listOf(Shape.BAR to "Barra", Shape.CUTOUT to "Cutout"),
+            listOf(
+                Shape.BAR to "Barra",
+                Shape.CUTOUT to "Cutout"
+            ),
             s.shape
-        ) { apply(s.copy(shape = it)) }
+        ) {
+            apply(s.copy(shape = it))
+        }
 
         if (s.shape == Shape.BAR) {
             Section("Posição")
+
             ChipRow(
                 listOf(
                     Position.TOP to "Topo",
@@ -246,73 +285,134 @@ fun SettingsScreen(
                     Position.RIGHT to "Direita"
                 ),
                 s.position
-            ) { apply(s.copy(position = it)) }
+            ) {
+                apply(s.copy(position = it))
+            }
 
             Section("Comprimento: " + s.widthDp + "dp")
+
             Slider(
                 value = s.widthDp.toFloat(),
-                onValueChange = { s = s.copy(widthDp = it.toInt()) },
-                onValueChangeFinished = { apply(s) },
+                onValueChange = {
+                    s = s.copy(widthDp = it.toInt())
+                },
+                onValueChangeFinished = {
+                    apply(s)
+                },
                 valueRange = 40f..400f
             )
 
             Section("Espessura: " + s.thicknessDp + "dp")
+
             Slider(
                 value = s.thicknessDp.toFloat(),
-                onValueChange = { s = s.copy(thicknessDp = it.toInt()) },
-                onValueChangeFinished = { apply(s) },
+                onValueChange = {
+                    s = s.copy(thicknessDp = it.toInt())
+                },
+                onValueChangeFinished = {
+                    apply(s)
+                },
                 valueRange = 2f..24f
             )
 
-            Stepper("Deslocamento ao longo da margem", s.offsetAlongDp) {
+            Stepper(
+                "Deslocamento ao longo da margem",
+                s.offsetAlongDp
+            ) {
                 apply(s.copy(offsetAlongDp = it))
             }
-            Stepper("Distância à margem", s.offsetFromEdgeDp) {
-                apply(s.copy(offsetFromEdgeDp = it.coerceAtLeast(0)))
+
+            Stepper(
+                "Distância à margem",
+                s.offsetFromEdgeDp
+            ) {
+                apply(
+                    s.copy(
+                        offsetFromEdgeDp = it.coerceAtLeast(0)
+                    )
+                )
             }
         } else {
             Section("Stroke: " + s.strokeDp + "dp")
+
             Slider(
                 value = s.strokeDp.toFloat(),
-                onValueChange = { s = s.copy(strokeDp = it.toInt()) },
-                onValueChangeFinished = { apply(s) },
+                onValueChange = {
+                    s = s.copy(strokeDp = it.toInt())
+                },
+                onValueChangeFinished = {
+                    apply(s)
+                },
                 valueRange = 2f..12f
             )
 
-            Section("Escala horizontal: " + String.format("%.2f", s.hScale) + "×")
+            Section(
+                "Escala horizontal: " +
+                    String.format("%.2f", s.hScale) +
+                    "×"
+            )
+
             Slider(
                 value = s.hScale,
-                onValueChange = { s = s.copy(hScale = it) },
-                onValueChangeFinished = { apply(s) },
+                onValueChange = {
+                    s = s.copy(hScale = it)
+                },
+                onValueChangeFinished = {
+                    apply(s)
+                },
                 valueRange = 0.5f..2.0f
             )
 
-            Section("Escala vertical: " + String.format("%.2f", s.vScale) + "×")
+            Section(
+                "Escala vertical: " +
+                    String.format("%.2f", s.vScale) +
+                    "×"
+            )
+
             Slider(
                 value = s.vScale,
-                onValueChange = { s = s.copy(vScale = it) },
-                onValueChangeFinished = { apply(s) },
+                onValueChange = {
+                    s = s.copy(vScale = it)
+                },
+                onValueChangeFinished = {
+                    apply(s)
+                },
                 valueRange = 0.5f..2.0f
             )
 
-            Stepper("Deslocar esquerda/direita", s.cutoutOffsetXDp) {
+            Stepper(
+                "Deslocar esquerda/direita",
+                s.cutoutOffsetXDp
+            ) {
                 apply(s.copy(cutoutOffsetXDp = it))
             }
-            Stepper("Deslocar cima/baixo", s.cutoutOffsetYDp) {
+
+            Stepper(
+                "Deslocar cima/baixo",
+                s.cutoutOffsetYDp
+            ) {
                 apply(s.copy(cutoutOffsetYDp = it))
             }
 
-            TextButton(onClick = {
-                apply(
-                    s.copy(
-                        strokeDp = 4, hScale = 1f, vScale = 1f,
-                        cutoutOffsetXDp = 0, cutoutOffsetYDp = 0
+            TextButton(
+                onClick = {
+                    apply(
+                        s.copy(
+                            strokeDp = 4,
+                            hScale = 1f,
+                            vScale = 1f,
+                            cutoutOffsetXDp = 0,
+                            cutoutOffsetYDp = 0
+                        )
                     )
-                )
-            }) { Text("Repor tamanho e posição") }
+                }
+            ) {
+                Text("Repor tamanho e posição")
+            }
         }
 
         Section("Modo de animação")
+
         ChipRow(
             listOf(
                 AnimMode.NONE to "Nenhuma",
@@ -321,9 +421,12 @@ fun SettingsScreen(
                 AnimMode.BREATHE to "Breathe"
             ),
             s.animMode
-        ) { apply(s.copy(animMode = it)) }
+        ) {
+            apply(s.copy(animMode = it))
+        }
 
         Section("Velocidade")
+
         ChipRow(
             listOf(
                 AnimSpeed.SLOW to "Lenta",
@@ -331,74 +434,108 @@ fun SettingsScreen(
                 AnimSpeed.FAST to "Rápida"
             ),
             s.animSpeed
-        ) { apply(s.copy(animSpeed = it)) }
+        ) {
+            apply(s.copy(animSpeed = it))
+        }
 
         Section("Funcionalidades")
+
         ToggleRow(
             "Indicador de bateria",
             "O vermelho avança à medida que a bateria desce; verde a carregar",
             s.batteryIndicator
-        ) { apply(s.copy(batteryIndicator = it)) }
+        ) {
+            apply(s.copy(batteryIndicator = it))
+        }
 
         ToggleRow(
             "Notification glow",
             "Flash breve quando chega uma notificação",
             s.notificationGlow
-        ) { apply(s.copy(notificationGlow = it)) }
+        ) {
+            apply(s.copy(notificationGlow = it))
+        }
 
         ToggleRow(
             "Notification progress",
             "A barra torna-se indicador de progresso em downloads/uploads",
             s.notificationProgress
-        ) { apply(s.copy(notificationProgress = it)) }
+        ) {
+            apply(s.copy(notificationProgress = it))
+        }
 
         ToggleRow(
             "Arrancar após reiniciar",
             "Repõe a Glowbar depois de reiniciares o telefone, se estava ligada",
             s.autoStart
-        ) { apply(s.copy(autoStart = it)) }
+        ) {
+            apply(s.copy(autoStart = it))
+        }
 
         ToggleRow(
             "Esconder em fullscreen",
             "Oculta o glow durante vídeos e jogos em ecrã inteiro",
             s.autoHideFullscreen
-        ) { apply(s.copy(autoHideFullscreen = it)) }
+        ) {
+            apply(s.copy(autoHideFullscreen = it))
+        }
 
         Section("Aparência em repouso")
+
         ToggleRow(
             "Apagar quando não há avisos",
             "A barra fica cinzenta e quase transparente; só ganha cor e brilho " +
                 "quando chega notificação de uma app escolhida",
             s.idleDim
-        ) { apply(s.copy(idleDim = it)) }
+        ) {
+            apply(s.copy(idleDim = it))
+        }
 
         if (s.idleDim) {
-            Section("Intensidade em repouso: " + s.idleAlphaPct + "%")
+            Section(
+                "Intensidade em repouso: " +
+                    s.idleAlphaPct +
+                    "%"
+            )
+
             Slider(
                 value = s.idleAlphaPct.toFloat(),
-                onValueChange = { s = s.copy(idleAlphaPct = it.toInt()) },
-                onValueChangeFinished = { apply(s) },
+                onValueChange = {
+                    s = s.copy(idleAlphaPct = it.toInt())
+                },
+                onValueChangeFinished = {
+                    apply(s)
+                },
                 valueRange = 0f..60f
             )
         }
 
         Section("Notificações da própria Glowbar")
+
         ToggleRow(
             "Modo sem notificações",
             "Usa um serviço de acessibilidade em vez da permissão de " +
                 "sobreposição: desaparecem o aviso do sistema e a notificação " +
                 "permanente. Também dispensa o acesso ao histórico de utilização",
             s.accessibilityMode
-        ) { apply(s.copy(accessibilityMode = it)) }
+        ) {
+            apply(s.copy(accessibilityMode = it))
+        }
 
         if (s.accessibilityMode) {
             Spacer(Modifier.height(12.dp))
+
             OutlinedButton(
                 onClick = {
-                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    context.startActivity(
+                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    )
                 },
                 modifier = Modifier.fillMaxWidth()
-            ) { Text("Abrir definições de acessibilidade") }
+            ) {
+                Text("Abrir definições de acessibilidade")
+            }
+
             Text(
                 "Ativa lá a Glowbar. Sem isso, a barra não aparece neste modo.",
                 style = MaterialTheme.typography.bodySmall
@@ -406,23 +543,32 @@ fun SettingsScreen(
         }
 
         Section("Avisos das apps privadas")
+
         ToggleRow(
             "Manter aviso até abrir a app",
             "A barra respira nas cores das apps com avisos por resolver, em vez " +
                 "de um flash que passa despercebido",
             s.pendingUntilOpened
-        ) { apply(s.copy(pendingUntilOpened = it)) }
+        ) {
+            apply(s.copy(pendingUntilOpened = it))
+        }
 
         ToggleRow(
             "Tocar na barra abre a app",
             "Com avisos pendentes, um toque abre a app e limpa o sinal",
             s.tapToOpen
-        ) { apply(s.copy(tapToOpen = it)) }
+        ) {
+            apply(s.copy(tapToOpen = it))
+        }
 
         Section(
-            if (s.pendingTimeoutSec == 0) "Duração do aviso: até abrir a app"
-            else "Duração do aviso: " + formatTimeout(s.pendingTimeoutSec)
+            if (s.pendingTimeoutSec == 0)
+                "Duração do aviso: até abrir a app"
+            else
+                "Duração do aviso: " +
+                    formatTimeout(s.pendingTimeoutSec)
         )
+
         ChipRow(
             listOf(
                 0 to "Até abrir",
@@ -434,23 +580,37 @@ fun SettingsScreen(
                 1800 to "30min"
             ),
             s.pendingTimeoutSec
-        ) { apply(s.copy(pendingTimeoutSec = it)) }
+        ) {
+            apply(s.copy(pendingTimeoutSec = it))
+        }
 
         ToggleRow(
             "Acordar o ecrã",
             "Liga o ecrã por alguns segundos quando chega aviso de uma app " +
                 "privada, para veres o glow com o telefone pousado",
             s.wakeScreen
-        ) { apply(s.copy(wakeScreen = it)) }
+        ) {
+            apply(s.copy(wakeScreen = it))
+        }
 
         if (s.wakeScreen) {
-            Section("Ecrã ligado durante: " + s.wakeScreenSec + "s")
+            Section(
+                "Ecrã ligado durante: " +
+                    s.wakeScreenSec +
+                    "s"
+            )
+
             Slider(
                 value = s.wakeScreenSec.toFloat(),
-                onValueChange = { s = s.copy(wakeScreenSec = it.toInt()) },
-                onValueChangeFinished = { apply(s) },
+                onValueChange = {
+                    s = s.copy(wakeScreenSec = it.toInt())
+                },
+                onValueChangeFinished = {
+                    apply(s)
+                },
                 valueRange = 2f..30f
             )
+
             Text(
                 "Se o glow aparece por cima do ecrã de bloqueio depende do " +
                     "fabricante do telefone. Usar isto com frequência gasta bateria.",
@@ -458,14 +618,24 @@ fun SettingsScreen(
             )
         }
 
-        if (s.pendingUntilOpened && !s.accessibilityMode && !hasUsageAccess(context)) {
+        if (
+            s.pendingUntilOpened &&
+            !s.accessibilityMode &&
+            !hasUsageAccess(context)
+        ) {
             Spacer(Modifier.height(12.dp))
+
             OutlinedButton(
                 onClick = {
-                    context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                    context.startActivity(
+                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+                    )
                 },
                 modifier = Modifier.fillMaxWidth()
-            ) { Text("Permitir acesso ao histórico de utilização") }
+            ) {
+                Text("Permitir acesso ao histórico de utilização")
+            }
+
             Text(
                 "Necessário para a Glowbar perceber que abriste a app e apagar o aviso",
                 style = MaterialTheme.typography.bodySmall
@@ -473,10 +643,14 @@ fun SettingsScreen(
         }
 
         Spacer(Modifier.height(20.dp))
+
         OutlinedButton(
             onClick = onOpenPrivateApps,
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Aplicações privadas…") }
+        ) {
+            Text("Aplicações privadas…")
+        }
+
         Text(
             "Notificações destas apps aparecem só na Glowbar, nunca no sistema",
             style = MaterialTheme.typography.bodySmall
@@ -487,94 +661,160 @@ fun SettingsScreen(
 }
 
 /**
- * Mostra em texto claro o que falta para a app funcionar, em vez de falhar
- * em silêncio. O acesso às notificações é obrigatório para as apps privadas,
- * para o notification glow e para o notification progress.
+ * Mostra em texto claro o que falta para a app funcionar.
  */
 @Composable
-private fun StatusPanel(s: GlowSettings, context: Context) {
-    val rules = remember { AppRulesRepository(context) }
-    val privateCount = rules.privatePackages().size
-    val needsNotifAccess =
-        s.notificationGlow || s.notificationProgress || privateCount > 0
-    val hasNotif = hasNotificationAccess(context)
-    val a11yOn = GlowAccessibilityService.instance != null
-    val missingOverlayPermission =
-        s.enabled && !s.accessibilityMode && !Settings.canDrawOverlays(context)
+private fun StatusPanel(
+    s: GlowSettings,
+    context: Context
+) {
+    val rules = remember {
+        AppRulesRepository(context)
+    }
 
-    val problems = mutableListOf<String>()
+    val privateCount = rules.privatePackages().size
+
+    val needsNotifAccess =
+        s.notificationGlow ||
+            s.notificationProgress ||
+            privateCount > 0
+
+    val hasNotif =
+        hasNotificationAccess(context)
+
+    val a11yOn =
+        GlowAccessibilityService.instance != null
+
+    val missingOverlayPermission =
+        s.enabled &&
+            !s.accessibilityMode &&
+            !Settings.canDrawOverlays(context)
+
+    val problems =
+        mutableListOf<String>()
+
     if (needsNotifAccess && !hasNotif) {
-        problems.add("Falta o acesso às notificações — sem ele as apps privadas e o glow de notificações não funcionam.")
+        problems.add(
+            "Falta o acesso às notificações — sem ele as apps privadas e o glow de notificações não funcionam."
+        )
     }
+
     if (s.accessibilityMode && !a11yOn) {
-        problems.add("O modo sem notificações está ligado, mas a Glowbar ainda não foi ativada nas definições de acessibilidade.")
+        problems.add(
+            "O modo sem notificações está ligado, mas a Glowbar ainda não foi ativada nas definições de acessibilidade."
+        )
     }
+
     if (missingOverlayPermission) {
-        problems.add("Falta a permissão para mostrar a Glowbar por cima das outras aplicações.")
+        problems.add(
+            "Falta a permissão para mostrar a Glowbar por cima das outras aplicações."
+        )
     }
+
     if (!s.enabled) {
-        problems.add("A Glowbar está desligada no interruptor acima.")
+        problems.add(
+            "A Glowbar está desligada no interruptor acima."
+        )
     }
 
     if (problems.isEmpty()) return
 
     Spacer(Modifier.height(16.dp))
+
     Card {
         Column(Modifier.padding(14.dp)) {
-            Text("Estado", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Estado",
+                style = MaterialTheme.typography.titleSmall
+            )
+
             Spacer(Modifier.height(6.dp))
+
             problems.forEach {
-                Text("• " + it, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "• " + it,
+                    style = MaterialTheme.typography.bodySmall
+                )
+
                 Spacer(Modifier.height(4.dp))
             }
+
             if (needsNotifAccess && !hasNotif) {
                 Spacer(Modifier.height(6.dp))
+
                 OutlinedButton(
                     onClick = {
                         context.startActivity(
-                            Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                            Intent(
+                                Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS
+                            )
                         )
                     },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("Conceder acesso às notificações") }
+                ) {
+                    Text("Conceder acesso às notificações")
+                }
             }
+
             if (s.accessibilityMode && !a11yOn) {
                 Spacer(Modifier.height(6.dp))
+
                 OutlinedButton(
                     onClick = {
-                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        context.startActivity(
+                            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        )
                     },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("Abrir definições de acessibilidade") }
+                ) {
+                    Text("Abrir definições de acessibilidade")
+                }
             }
+
             if (missingOverlayPermission) {
                 Spacer(Modifier.height(6.dp))
+
                 OutlinedButton(
                     onClick = {
                         context.startActivity(
                             Intent(
                                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                Uri.parse("package:" + context.packageName)
+                                Uri.parse(
+                                    "package:" + context.packageName
+                                )
                             )
                         )
                     },
                     modifier = Modifier.fillMaxWidth()
-                ) { Text("Conceder permissão de sobreposição") }
+                ) {
+                    Text("Conceder permissão de sobreposição")
+                }
             }
         }
     }
 }
 
-private fun formatTimeout(sec: Int): String = when {
-    sec < 60 -> sec.toString() + "s"
-    sec % 60 == 0 && sec < 3600 -> (sec / 60).toString() + "min"
-    else -> (sec / 60).toString() + "min"
-}
+private fun formatTimeout(sec: Int): String =
+    when {
+        sec < 60 ->
+            sec.toString() + "s"
+
+        sec % 60 == 0 && sec < 3600 ->
+            (sec / 60).toString() + "min"
+
+        else ->
+            (sec / 60).toString() + "min"
+    }
 
 @Composable
 private fun Section(title: String) {
     Spacer(Modifier.height(20.dp))
-    Text(title, style = MaterialTheme.typography.titleSmall)
+
+    Text(
+        title,
+        style = MaterialTheme.typography.titleSmall
+    )
+
     Spacer(Modifier.height(8.dp))
 }
 
@@ -585,12 +825,18 @@ private fun <T> ChipRow(
     selected: T,
     onSelect: (T) -> Unit
 ) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
         options.forEach { (value, label) ->
             FilterChip(
                 selected = value == selected,
-                onClick = { onSelect(value) },
-                label = { Text(label) }
+                onClick = {
+                    onSelect(value)
+                },
+                label = {
+                    Text(label)
+                }
             )
         }
     }
@@ -604,18 +850,38 @@ private fun Stepper(
     onChange: (Int) -> Unit
 ) {
     Spacer(Modifier.height(12.dp))
+
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        OutlinedButton(onClick = { onChange(value - 2) }) { Text("−") }
+        Text(
+            label,
+            Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium
+        )
+
+        OutlinedButton(
+            onClick = {
+                onChange(value - 2)
+            }
+        ) {
+            Text("−")
+        }
+
         Text(
             value.toString() + unit,
             Modifier.padding(horizontal = 10.dp),
             style = MaterialTheme.typography.bodyMedium
         )
-        OutlinedButton(onClick = { onChange(value + 2) }) { Text("+") }
+
+        OutlinedButton(
+            onClick = {
+                onChange(value + 2)
+            }
+        ) {
+            Text("+")
+        }
     }
 }
 
@@ -627,11 +893,27 @@ private fun ToggleRow(
     onChange: (Boolean) -> Unit
 ) {
     Spacer(Modifier.height(12.dp))
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall)
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(
+            Modifier.weight(1f)
+        ) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall
+            )
+
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall
+            )
         }
-        Switch(checked = checked, onCheckedChange = onChange)
+
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange
+        )
     }
 }
