@@ -76,16 +76,22 @@ jobs:
           VERSION=$(grep 'versionName' app/build.gradle.kts | sed -E 's/.*versionName = "([^"]+)".*/\1/')
           TAG="v${VERSION}"
 
-          # Se a release já existir, faz upload do novo ficheiro; se não, cria de raiz
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "Release $TAG já existe. A atualizar ficheiro..."
+          set +e
+          CREATE_OUTPUT=$(gh release create "$TAG" \
+            app/build/outputs/apk/debug/app-debug.apk \
+            --title "Glowbar ${VERSION}" \
+            --generate-notes 2>&1)
+          CREATE_STATUS=$?
+          set -e
+
+          if [ $CREATE_STATUS -eq 0 ]; then
+            echo "$CREATE_OUTPUT"
+          elif echo "$CREATE_OUTPUT" | grep -q "a release with the same tag name already exists"; then
+            echo "Release $TAG already exists. Updating APK asset..."
             gh release upload "$TAG" app/build/outputs/apk/debug/app-debug.apk --clobber
           else
-            echo "A criar nova release $TAG..."
-            gh release create "$TAG" \
-              app/build/outputs/apk/debug/app-debug.apk \
-              --title "Glowbar ${VERSION}" \
-              --generate-notes
+            echo "$CREATE_OUTPUT"
+            exit $CREATE_STATUS
           fi
 
       - name: Upload lint report on failure
