@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import pt.diogo.glowbar.overlay.GlowAccessibilityService
 import pt.diogo.glowbar.overlay.GlowOverlayService
 import pt.diogo.glowbar.overlay.GlowController
@@ -64,12 +65,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // A interface de definições deve respeitar a status bar e a
-        // navigation bar. A Glowbar propriamente dita é um overlay
-        // independente e continua a poder usar o display cutout.
-        WindowCompat.setDecorFitsSystemWindows(window, true)
-
         val repo = SettingsRepository(this)
+
+        // A interface da Glowbar usa edge-to-edge, mas o conteúdo
+        // é protegido das system bars através de systemBarsPadding().
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        // Ícones brancos na status bar e na navigation bar.
+        WindowInsetsControllerCompat(
+            window,
+            window.decorView
+        ).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
 
         setContent {
             val refreshKey = resumeVersion.intValue
@@ -86,17 +95,23 @@ class MainActivity : ComponentActivity() {
                         .fillMaxSize()
                         .systemBarsPadding()
                 ) {
-                    var showPrivate by remember { mutableStateOf(false) }
+                    var showPrivate by remember {
+                        mutableStateOf(false)
+                    }
 
                     if (showPrivate) {
                         PrivateAppsScreen(
-                            onBack = { showPrivate = false }
+                            onBack = {
+                                showPrivate = false
+                            }
                         )
                     } else {
                         SettingsScreen(
                             repo = repo,
                             refreshKey = refreshKey,
-                            onOpenPrivateApps = { showPrivate = true }
+                            onOpenPrivateApps = {
+                                showPrivate = true
+                            }
                         )
                     }
                 }
