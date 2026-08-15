@@ -265,36 +265,77 @@ class GlowController(
     private fun updateCutoutGeometry(insets: WindowInsets) {
         if (Build.VERSION.SDK_INT < 28) return
 
-        val candidate = insets.displayCutout?.boundingRects?.firstOrNull()?.let { RectF(it) }
         val metrics = context.resources.displayMetrics
+        val w = metrics.widthPixels.toFloat()
+        val h = metrics.heightPixels.toFloat()
+        val rotation = wm.defaultDisplay.rotation
 
-        if (candidate != null && plausibleCutout(candidate)) {
-            // Uma deteção pequena é a melhor fonte de verdade. Guardamo-la em
-            // coordenadas normalizadas da orientação natural (portrait).
-            val rotation = wm.defaultDisplay.rotation
-            val w = metrics.widthPixels.toFloat()
-            val h = metrics.heightPixels.toFloat()
-            val currentX = candidate.centerX() / w
-            val currentY = candidate.centerY() / h
+        val isLandscape =
+            rotation == Surface.ROTATION_90 ||
+            rotation == Surface.ROTATION_270
 
-            val (naturalX, naturalY) = when (rotation) {
-                Surface.ROTATION_0 -> currentX to currentY
-                Surface.ROTATION_90 -> currentY to (1f - currentX)
-                Surface.ROTATION_180 -> (1f - currentX) to (1f - currentY)
-                Surface.ROTATION_270 -> (1f - currentY) to currentX
-                else -> currentX to currentY
+        if (!isLandscape) {
+            /*
+            * Só em portrait aceitamos a boundingRect fornecida pelo Android.
+            *
+            * Em landscape, alguns dispositivos/versões do Android podem
+            * representar o display cutout através de uma área de letterboxing
+            * em vez do pequeno punch-hole físico. Por isso nunca usamos uma
+            * boundingRect de landscape para determinar o tamanho do anel.
+            */
+            val candidate = insets.displayCutout
+                ?.boundingRects
+                ?.firstOrNull()
+                ?.let { RectF(it) }
+
+            if (candidate != null && plausibleCutout(candidate)) {
+                val currentX = candidate.centerX() / w
+                val currentY = candidate.centerY() / h
+
+                /*
+                * Guardamos a posição na orientação natural (portrait), para
+                * podermos reconstruí-la corretamente depois da rotação.
+                */
+                val (naturalX, naturalY) = when (rotation) {
+                    Surface.ROTATION_0 ->
+                        currentX to currentY
+
+                    Surface.ROTATION_180 ->
+                        (1f - currentX) to (1f - currentY)
+
+                    else ->
+                        currentX to currentY
+                }
+
+                /*
+                * O tamanho físico do punch-hole fica congelado aqui.
+                * Nunca será substituído por uma boundingRect de landscape.
+                */
+                cachedCutoutWidthPx = maxOf(
+                    candidate.width(),
+                    candidate.height()
+                )
+
+                cachedCutoutCenterXNorm = naturalX
+                cachedCutoutCenterYNorm = naturalY
+
+                detectedCutoutRect = candidate
             }
+        }
 
-            cachedCutoutWidthPx = candidate.width()
-            cachedCutoutCenterXNorm = naturalX
-            cachedCutoutCenterYNorm = naturalY
-            detectedCutoutRect = candidate
-        } else if (cachedCutoutWidthPx != null) {
-            // Landscape/letterbox: não aceitamos a caixa gigante. Reconstruímos
-            // uma caixa quadrada do mesmo diâmetro físico na posição rodada.
+        /*
+        * Landscape:
+        *
+        * Não usamos insets.displayCutout.boundingRects.
+        * Reutilizamos exatamente o tamanho físico aprendido em portrait
+        * e apenas transformamos a posição.
+        */
+        if (isLandscape && cachedCutoutWidthPx != null) {
             val center = cachedCutoutCenterForCurrentRotation()
+
             if (center != null) {
                 val half = cachedCutoutWidthPx!! / 2f
+
                 detectedCutoutRect = RectF(
                     center.first - half,
                     center.second - half,
@@ -307,7 +348,6 @@ class GlowController(
         glowView?.cutoutRect = detectedCutoutRect
         updateTouchOverlay()
     }
-
     fun rebuild() {
         val newSettings = repo.load()
         val oldSettings = settings
