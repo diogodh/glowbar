@@ -55,6 +55,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import pt.diogo.glowbar.overlay.GlowAccessibilityService
 import pt.diogo.glowbar.overlay.GlowOverlayService
+import pt.diogo.glowbar.overlay.GlowController
 
 class MainActivity : ComponentActivity() {
     private val resumeVersion = mutableIntStateOf(0)
@@ -79,7 +80,11 @@ class MainActivity : ComponentActivity() {
                     lightColorScheme()
                 }
             ) {
-                Surface(Modifier.fillMaxSize()) {
+                Surface(
+                    Modifier
+                        .fillMaxSize()
+                        .systemBarsPadding()
+                ) {
                     var showPrivate by remember { mutableStateOf(false) }
 
                     if (showPrivate) {
@@ -100,8 +105,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+
         reconcileRunningMode()
+
+        // A Glowbar não deve aparecer por cima da própria interface
+        // de definições da Glowbar.
+        GlowController.active?.hideTemporarily(true)
+
         resumeVersion.intValue++
+    }
+
+    override fun onPause() {
+        super.onPause()
+
+        // Quando saímos das definições, volta a mostrar a Glowbar.
+        GlowController.active?.hideTemporarily(false)
     }
 
     private fun reconcileRunningMode() {
