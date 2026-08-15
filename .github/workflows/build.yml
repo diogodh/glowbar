@@ -6,7 +6,7 @@ name: Build Glowbar APK
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: glowbar-build-${{ github.ref }}
