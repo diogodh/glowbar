@@ -254,9 +254,9 @@ class GlowController(
 
         val (nx, ny) = when (rotation) {
             Surface.ROTATION_0 -> cx to cy
-            Surface.ROTATION_90 -> (1f - cy) to cx
+            Surface.ROTATION_90 -> cy to (1f - cx)
             Surface.ROTATION_180 -> (1f - cx) to (1f - cy)
-            Surface.ROTATION_270 -> cy to (1f - cx)
+            Surface.ROTATION_270 -> (1f - cy) to cx
             else -> cx to cy
         }
         return nx * w to ny * h
