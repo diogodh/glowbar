@@ -81,7 +81,7 @@ class GlowController(
      * letterboxing em vez do pequeno cutout físico; nesse caso reutilizamos a
      * geometria física e apenas rodamos a sua posição.
      */
-    private var cachedCutoutWidthPx: Float? = null
+    private var cachedCutoutDiameterDp: Float? = null
     private var cachedCutoutCenterXNorm: Float? = null
     private var cachedCutoutCenterYNorm: Float? = null
 
@@ -205,7 +205,7 @@ class GlowController(
         }
         glowView = null
         detectedCutoutRect = null
-        cachedCutoutWidthPx = null
+        cachedCutoutDiameterDp = null
         cachedCutoutCenterXNorm = null
         cachedCutoutCenterYNorm = null
         currentForegroundPackage = null
@@ -311,10 +311,10 @@ class GlowController(
                 * O tamanho físico do punch-hole fica congelado aqui.
                 * Nunca será substituído por uma boundingRect de landscape.
                 */
-                cachedCutoutWidthPx = maxOf(
-                    candidate.width(),
-                    candidate.height()
-                )
+                val density = metrics.density
+
+                cachedCutoutDiameterDp =
+                    minOf(candidate.width(), candidate.height()) / density
 
                 cachedCutoutCenterXNorm = naturalX
                 cachedCutoutCenterYNorm = naturalY
@@ -330,11 +330,12 @@ class GlowController(
         * Reutilizamos exatamente o tamanho físico aprendido em portrait
         * e apenas transformamos a posição.
         */
-        if (isLandscape && cachedCutoutWidthPx != null) {
+        if (isLandscape && cachedCutoutDiameterDp != null) {
             val center = cachedCutoutCenterForCurrentRotation()
 
             if (center != null) {
-                val half = cachedCutoutWidthPx!! / 2f
+                val diameterPx = cachedCutoutDiameterDp!! * metrics.density
+                val half = diameterPx / 2f
 
                 detectedCutoutRect = RectF(
                     center.first - half,

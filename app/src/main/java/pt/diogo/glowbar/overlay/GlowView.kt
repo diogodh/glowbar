@@ -495,7 +495,8 @@ class GlowView(context: Context) : View(context) {
         // de um círculo. hScale/vScale continuam a servir para ajustar formas
         // realmente ovais (pill) ou fazer correções finas.
         val margin = stroke / 2f + dp(2f)
-        val baseRadius = base.width() / 2f + margin
+        val cutoutDiameter = minOf(base.width(), base.height())
+        val baseRadius = cutoutDiameter / 2f + margin
         val rx = baseRadius * s.hScale
         val ry = baseRadius * s.vScale
         val oval = RectF(cx - rx, cy - ry, cx + rx, cy + ry)
