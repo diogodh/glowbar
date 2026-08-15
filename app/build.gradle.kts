@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,13 +14,31 @@ android {
         applicationId = "pt.diogo.glowbar"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.1"
+    }
+
+    signingConfigs {
+        create("glowbarRelease") {
+            val keystoreFile = file("glowbar-release.jks")
+
+            if (keystoreFile.exists()) {
+                storeFile = keystoreFile
+                storePassword = System.getenv("GLOWBAR_KEYSTORE_PASSWORD")
+                keyAlias = "glowbar"
+                keyPassword = System.getenv("GLOWBAR_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("glowbarRelease")
+        }
+
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("glowbarRelease")
         }
     }
 
@@ -35,6 +55,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
     kotlinOptions {
         jvmTarget = "17"
     }

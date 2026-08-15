@@ -49,10 +49,21 @@ jobs:
           gradle-version: '8.7'
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
+      - name: Recreate release keystore
+        shell: bash
+        env:
+          GLOWBAR_KEYSTORE_BASE64: ${{ secrets.GLOWBAR_KEYSTORE_BASE64 }}
+        run: |
+          echo "$GLOWBAR_KEYSTORE_BASE64" | base64 --decode > app/glowbar-release.jks
+          chmod 600 app/glowbar-release.jks
+
       - name: Verify Gradle environment
         run: gradle --version
 
       - name: Lint, test and build debug APK
+        env:
+          GLOWBAR_KEYSTORE_PASSWORD: ${{ secrets.GLOWBAR_KEYSTORE_PASSWORD }}
+          GLOWBAR_KEY_PASSWORD: ${{ secrets.GLOWBAR_KEY_PASSWORD }}
         run: >-
           gradle --no-daemon --stacktrace
           clean lintDebug testDebugUnitTest assembleDebug
@@ -60,7 +71,7 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Glowbar-1.2.0-debug
+          name: Glowbar-1.2.1-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
